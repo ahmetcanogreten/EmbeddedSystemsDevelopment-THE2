@@ -134,78 +134,15 @@ commitCurrentLetter res 1   ; Used to signal main to commit current letter after
 tempTRISD   res 1   ; to save and restore display
 tempLATD    res 1   ; while polling for keypad
 tempLATA    res 1   
+    
+    
+pollCounter res 1   ;
 			    
 org     0x00
-goto	init
+goto	initialState
 
 org     0x08
 goto    isr
-	
-init:
-    
-    ;***** State Setup ******
-    clrf    outerState	    
-    bsf	    outerState, 0   ; Start from initialState  
-    ;************************  
-    
-    ;***** RB3 (initialState -> writeState) Setup ******
-    clrf    LATB
-    clrf    TRISB		;
-    bsf	    TRISB, 3		; Configure RB3 as input
-    ;************************
-    
-    ;***** RB4 (writeState-reviewState Change Interrupt) Setup******
-    clrf    rb4ButtonState
-    bsf	    rb4ButtonState, 0	; Start from definetlyReleased state
-    bsf	    TRISB, 4		; Configure RB4 as input    
-    bcf	    INTCON2, 7		; PORTB pull-ups are enabled
-    ;************************
-    
-    ;***** Timer1 Setup (for RB4 debouncing, 10ms is set in ISR)******
-    clrf    T1CON
-    bsf	    T1CON, 4		; 1:2 Prescale set
-    bsf	    INTCON, 6		; Peripheral Interrupts Enabled
-    ;************************
-    
-    ;***** Timer2 Setup (for Screen Updating, at every --ms one of 7-seg will be set) ******
-    movlw   b'01111000'		; 1:16 Prescale and 1:16 Postscale
-    movwf   T2CON
-    ;************************
-    
-    ;***** 20 seconds Count Down register are set******        
-    movlw   0x02
-    movwf   countDownCounterTens
-    movlw   0x00
-    movwf   countDownCounterOnes	
-    ;************************
-    
-    ;***** 7-Segment setup ******
-    clrf    LATD		
-    clrf    TRISD		; PORTD all bits are set as output
-    setf    ADCON1		;   Configure PORTA as digital
-    clrf    LATA
-    movlw   b'11000011'		; PORTA<2,3,4,5> bits are set as output
-    movwf   TRISA
-    
-    clrf    whichScreen
-    bsf	    whichScreen, 0
-    ;************************
-    
-    ;***** State Setup ******
-    ;TODO
-    ;************************
-    
-    ;***** General Interrupt Setup ******
-    bcf	    RCON, 7	    ; Disable Priorities for Interrupts
-    movf    PORTB	    ; Must have last-read value of RB
-    bcf	    INTCON, 0	    ; so that RBIF can be cleared
-    bsf	    INTCON, 7	    ; Enable GIE
-    ;************************
-    
-    ;***** Start Main Loop ******
-    goto from_initial_to_write;main
-    ;************************
-    
 
 isr:
     btfsc   INTCON, 0	    ; Is it because of RB4, check RBIF
@@ -328,7 +265,17 @@ main:
     btfsc   outerState, 3   ; Is in readState ?
 	bra readState	    ; Yes, go to readState
     
-initialState:    
+initialState:
+    
+    ;***** RB3 (initialState -> writeState button) Setup ******
+    clrf    LATB
+    clrf    TRISB		;
+    bsf	    TRISB, 3		; Configure RB3 as input
+    ;************************   
+    
+    ;***** Start Main Loop ******
+    bra from_initial_to_write;main
+    ;************************
     rb3_Released:
 	btfsc	PORTB, 3	    ; Is Pressed ? (LOW ?)
 	    bra rb3_Released	    ; No, then wait
@@ -351,12 +298,20 @@ initialState:
 	call wait_for_n_times_10ms  ; will wait for (count_256 * 10ms)
 	
 	btfss	PORTB, 3	    ; Is still Released?
-	    bra rb3_Pressed	    ; No, then wait
-	    
-    
+	    bra rb3_Pressed	    ; No, then wait     
     from_initial_to_write:
 	bcf	outerState, 0	    ; Yes,
 	bsf	outerState, 1	    ; then go into writeState
+	
+	
+	;***** RB4 (writeState-reviewState Change Interrupt) Setup******
+	clrf	    rb4ButtonState
+	bsf	    rb4ButtonState, 0	; Start from definetlyReleased state
+	bsf	    TRISB, 4		; Configure RB4 as input    
+	bcf	    INTCON2, 7		; PORTB pull-ups are enabled
+	bsf	    INTCON, 3		; Enable RBs InterruptOnChange so that RB4 interrupts
+
+	;************************
 	
 	;***** TIMER0 SETUP for 1 second (will be used for 20 seconds countdown) ************
 	movlw   b'00000111'	; 1:256 scale is set
@@ -373,12 +328,27 @@ initialState:
 	bcf	    INTCON, 2	; so that TMR0IF can be cleared
 	;******************************************	
 	
+	;***** 20 seconds Count Down register are set******        
+	movlw   0x02
+	movwf   countDownCounterTens
+	movlw   0x00
+	movwf   countDownCounterOnes	
+	;************************
+
+	;***** TIMER1 SETUP (for debouncing of RB4 and KEYPAD, 10ms is set in ISR)******
+	clrf	    T1CON
+	bsf	    T1CON, 4		; 1:2 Prescale set
+	bsf	    INTCON, 6		; Peripheral Interrupts Enabled
+	;************************
+	
 	;******* RB4 and KEYPAD Debouincing Register SETUP*********
 	clrf	attentionRequired
 	;******************
-	
-	;***** TIMER2 SETUP for screen updating ************
 
+	;***** TIMER2 Setup (for Screen Updating, at every --ms one of 7-seg will be set) ******
+	movlw   b'01111000'		; 1:16 Prescale and 1:16 Postscale
+	movwf   T2CON
+	
 	movlw	    0xC3
 	movwf	    PR2
 
@@ -403,10 +373,18 @@ initialState:
 	;bsf	PIE2, 1		; TMR3 interrupt enabled
 	;bsf	T3CON, 0	; TMR3 is started
 	;*****************************
-	
-	;***** Preparation for writeState & reviewState
-	bsf	    INTCON, 3		; Enable RBs InterruptOnChange so that RB4 interrupts
-	;************************************
+
+	;***** 7-Segment setup ******
+	clrf    LATD		
+	clrf    TRISD		; PORTD all bits are set as output
+	setf    ADCON1		;   Configure PORTA as digital
+	clrf    LATA
+	movlw   b'11000011'		; PORTA<2,3,4,5> bits are set as output
+	movwf   TRISA
+
+	clrf    whichScreen	
+	bsf	whichScreen, 0	; Next screen to be drawn is Screen1
+	;************************	
 	
 	;****** KEYPAD SETUP *********
 	bcf	TRISB, 0
@@ -435,6 +413,12 @@ initialState:
 	clrf	currentPushedButton
 	;************************************************
 	
+	;***** General Interrupt Setup ******
+	bcf	    RCON, 7	    ; Disable Priorities for Interrupts
+	movf    PORTB	    ; Must have last-read value of RB
+	bcf	    INTCON, 0	    ; so that RBIF can be cleared
+	bsf	    INTCON, 7	    ; Enable GIE
+	;************************	
 	
 	bra	main	
 	
@@ -603,6 +587,7 @@ writeState:
 	    
 	    goto restore_current_display
     poll_all_keys:
+    
 	call save_current_display
 	
 	bsf LATB, 0		; set columns HIGH
