@@ -142,19 +142,19 @@ org     0x00
 goto	initialState
 
 org     0x08
-goto    isr
+bra    isr
 
 isr:
     btfsc   INTCON, 0	    ; Is it because of RB4, check RBIF
-	goto isr_rb4
+	bra isr_rb4
     btfsc   PIR1, 0	    ; Is it because of Timer1 (10ms debouncing of RB4), check TMR1IF
-	goto isr_timer1
+	bra isr_timer1
     btfsc   INTCON, 2	    ; Is it because of Timer0 (1 second passed), check TMR0IF
-	goto isr_timer0
+	bra isr_timer0
     btfsc   PIR1, 1	    ; Is it because of Timer2 (updating screen), check TMR1IF
-	goto isr_timer2
+	bra isr_timer2
     btfsc   PIR2, 1
-	goto isr_timer3
+	bra isr_timer3
 	
 isr_timer3:
     movf    PIR2	; must be read to have last-read value
@@ -172,7 +172,7 @@ isr_timer2:
     bcf	    PIR1, 1	; clear TMR2IF
     
     bsf	    shouldUpdateScreen, 0   ; Signal main that next screen must be drawn
-    retfie FAST
+    retfie  FAST
 	
 
 isr_timer0:    
@@ -256,8 +256,6 @@ wait_for_n_times_10ms:  ;n * 10ms (9.98 ms in fact)
     
     
 main:
-    btfsc   outerState, 0   ; Is in initialState ?
-	bra initialState    ; Yes, go to initialState
     btfsc   outerState, 1   ; Is in writeState ?
 	bra writeState	    ; Yes, go to writeState
     btfsc   outerState, 2   ; Is in reviewState ?
@@ -337,8 +335,15 @@ initialState:
 
 	;***** TIMER1 SETUP (for debouncing of RB4 and KEYPAD, 10ms is set in ISR)******
 	clrf	    T1CON
-	bsf	    T1CON, 4		; 1:2 Prescale set
+	;bsf	    T1CON, 4		; 1:2 Prescale set
 	bsf	    INTCON, 6		; Peripheral Interrupts Enabled
+	
+;	movlw	0x3C
+;	movwf	TMR1H
+;	movlw	0xB0
+;	movwf	TMR1L		; 0x3CB0 = 15536 is the initial value of Timer1
+;	bsf	T1CON, 0		; TMR1ON is set
+;	bsf	PIE1, 0			; TMR1IE is set
 	;************************
 	
 	;******* RB4 and KEYPAD Debouincing Register SETUP*********
@@ -346,7 +351,7 @@ initialState:
 	;******************
 
 	;***** TIMER2 Setup (for Screen Updating, at every --ms one of 7-seg will be set) ******
-	movlw   b'01111000'		; 1:16 Prescale and 1:16 Postscale
+	movlw   b'011110101'		; 1:16 Prescale and 1:16 Postscale
 	movwf   T2CON
 	
 	movlw	    0xC3
@@ -384,6 +389,7 @@ initialState:
 
 	clrf    whichScreen	
 	bsf	whichScreen, 0	; Next screen to be drawn is Screen1
+	bsf	shouldUpdateScreen, 0
 	;************************	
 	
 	;****** KEYPAD SETUP *********
@@ -406,6 +412,9 @@ initialState:
 	
 	clrf	isAnyKeyPressed		; currently no key is pressed
 	bsf	isAnyKeyPressed, 0	; wait in definitelyReleased state
+	
+	movlw	0x1
+	movwf	pollCounter
 	;****************************
 	
 	;******* Current Button Registers SETUP *********
@@ -429,16 +438,22 @@ writeState:
     btfsc   attentionRequired, 0    ; Did rb4 changed state ?
 	call rb4_action_detected    ; Yes, 
     btfsc   attentionRequired, 3    ; Did timer is up for debouincing
-	call whose_timer_is_up
-    btfsc   isAnyKeyPressed, 0	    ; Is in definetlyReleased
-	call poll_all_keys	    ; Yes, poll all keys
-    btfsc   isAnyKeyPressed, 2	    ; Is in definetlyPressed
-	call poll_specific_key	    ; Yes, poll the specific key
+	call whose_timer_is_up	    ; Yes, let's see if it is RB4 of KEYPAD
+    dcfsnz  pollCounter
+	call poll_keypad
     btfsc   commitCurrentLetter, 0  ; Should current letter be committed ?
 	call commit_current_letter  ; Yes, commit
     goto main
     
     commit_current_letter:
+	clrf	commitCurrentLetter
+	
+	movf    currentPushedButton, 0
+	mullw   0x03
+	movf    PRODL, 0
+	addwf   currentModulo, 0
+	
+	
 	dcfsnz	lastWrittenLetterPosition   ; Is last written letter_1 ?
 	    bra	commit_letter_2		    ; Then, current must be 2
 	dcfsnz	lastWrittenLetterPosition
@@ -451,18 +466,36 @@ writeState:
 	    bra	commit_letter_6
 	bra commit_letter_1		    ; Then, current must be first
 	
-	commit_letter_1:
-	    movf    currentPushedButton, 0
-	    mullw   0x03
-	    movf    PRODL, 0
-	    addwf   currentModulo, 0
+	commit_letter_1:	    
 	    movwf   letter_1
-	    return	    
+	    movlw   0x1
+	    bra	    common
 	commit_letter_2:
+	    movwf   letter_2
+	    movlw   0x2
+	    bra	    common    
 	commit_letter_3:
+	    movwf   letter_3
+	    movlw   0x3
+	    bra	    common	    
 	commit_letter_4:
+	    movwf   letter_4
+	    movlw   0x4
+	    bra	    common  
 	commit_letter_5:
+	    movwf   letter_5
+	    movlw   0x5
+	    bra	    common  
 	commit_letter_6:
+	    movwf   letter_6
+	    movlw   0x6
+	    bra	    common  
+	common:
+	    movwf   lastWrittenLetterPosition
+	    clrf    currentPushedButton
+	    clrf    currentModulo
+	    return
+    
 	
     save_current_display:
 	movff	LATA, tempLATA	    ; save current selection of display
@@ -472,260 +505,14 @@ writeState:
 	clrf	LATA		    ; do not select any
 	movlw	b'00001111'	    ; prepare for polling rd<0-3> configured as input
 	movwf	TRISD
+	clrf	LATD
 	return
     restore_current_display:
-	movff	tempLATA, LATA
 	movff	tempTRISD, TRISD
 	movff	tempLATD, LATD
-	return	
-    poll_specific_key:
-	call save_current_display
-	
-	bsf	LATB, 0
-	bsf	LATB, 1
-	bsf	LATB, 2
-
-	btfsc	rbPressedCoordinate, 1	    ; is it on COL2
-	    bra check_col2_pressed_def
-	btfsc	rbPressedCoordinate, 0	    ; is it on COL1
-	    bra check_col1_pressed_def
-	bra	check_col0_pressed_def    	    ; then, must be on COL0 
-
-	check_col2_pressed_def:
-	    bcf	LATB, 2
-	    movf    rdPressedCoordinate, 0
-	    dcfsnz  WREG		    ; Is it ROW1
-		bra col2_row1_pressed_def    
-	    dcfsnz  WREG		    ; Is it ROW2
-		bra col2_row2_pressed_def
-	    dcfsnz  WREG		    ; Is it ROW3
-		bra col2_row3_pressed_def
-	    bra col2_row0_pressed_def	    ; Then, must be ROW0
-
-	    col2_row0_pressed_def:
-		btfss	    PORTD, 0
-		    goto restore_current_display
-		goto poll_specific_key_common
-	    col2_row1_pressed_def:
-		btfss	    PORTD, 1
-		    goto restore_current_display
-		goto poll_specific_key_common
-	    col2_row2_pressed_def:
-		btfss	    PORTD, 2
-		    goto restore_current_display
-		goto poll_specific_key_common
-	    col2_row3_pressed_def:
-		btfss	    PORTD, 3
-		    goto restore_current_display
-		goto poll_specific_key_common		    
-	check_col1_pressed_def:
-	    bcf	LATB, 1
-	    movf    rdPressedCoordinate, 0
-	    dcfsnz  WREG		    ; Is it ROW1
-		bra col1_row1_pressed_def    
-	    dcfsnz  WREG		    ; Is it ROW2
-		bra col1_row2_pressed_def
-	    dcfsnz  WREG		    ; Is it ROW3
-		bra col1_row3_pressed_def
-	    bra col1_row0_pressed_def	    ; Then, must be ROW0
-
-	    col1_row0_pressed_def:
-		btfss	    PORTD, 0
-		    goto restore_current_display
-		goto poll_specific_key_common
-	    col1_row1_pressed_def:
-		btfss	    PORTD, 1
-		    goto restore_current_display
-		goto poll_specific_key_common
-	    col1_row2_pressed_def:
-		btfss	    PORTD, 2
-		    goto restore_current_display
-		goto poll_specific_key_common
-	    col1_row3_pressed_def:
-		btfss	    PORTD, 3
-		    goto restore_current_display
-		goto poll_specific_key_common
-	check_col0_pressed_def:
-	    bcf	LATB, 0
-	    movf    rdPressedCoordinate, 0
-	    dcfsnz  WREG		    ; Is it ROW1
-		bra col0_row1_pressed_def
-	    dcfsnz  WREG		    ; Is it ROW2
-		bra col0_row2_pressed_def
-	    dcfsnz  WREG		    ; Is it ROW3
-		bra col0_row3_pressed_def
-	    bra col0_row0_pressed_def   ; Then, must be ROW0
-
-	    col0_row0_pressed_def:
-		btfss	    PORTD, 0
-		    goto restore_current_display
-		goto poll_specific_key_common
-	    col0_row1_pressed_def:
-		btfss	    PORTD, 1
-		    goto restore_current_display
-		goto poll_specific_key_common
-	    col0_row2_pressed_def:
-		btfss	    PORTD, 2
-		    goto restore_current_display
-		goto poll_specific_key_common
-	    col0_row3_pressed_def:
-		btfss	    PORTD, 3
-		    goto restore_current_display
-		goto poll_specific_key_common
-	poll_specific_key_common:    
-	    bcf	isAnyKeyPressed, 2	; Change state into
-	    bsf	isAnyKeyPressed, 3	; mightBeReleased	   
-	    
-	    bsf		attentionRequired, 2	; Timer is set for KEYPAD
-						
-	    movlw	0x3C
-	    movwf	TMR1H
-	    movlw	0xB0
-	    movwf	TMR1L		; 0x3CB0 = 15536 is the initial value of Timer1
-	    bsf	T1CON, 0		; TMR1ON is set
-	    bsf	PIE1, 0			; TMR1IE is set
-	    
-	    goto restore_current_display
-    poll_all_keys:
+	movff	tempLATA, LATA
+	return	 
     
-	call save_current_display
-	
-	bsf LATB, 0		; set columns HIGH
-	bsf LATB, 1
-	bsf LATB, 2
-	
-	;********* POLL COL1 *******
-	poll_col1:
-	    bcf	LATB, 0
-	    btfss	PORTD, 0
-		bra coor_0_0
-	    btfss	PORTD, 1
-		bra coor_0_1
-	    btfss	PORTD, 2
-		bra coor_0_2
-	    btfss	PORTD, 3
-		bra coor_0_3
-
-	    bra poll_col2
-
-	    coor_0_0:
-		movlw   0x0
-		movwf   rbPressedCoordinate
-		movwf   rdPressedCoordinate
-		bra poll_all_keys_common	    
-	    coor_0_1:
-		movlw   0x0
-		movwf   rbPressedCoordinate
-		movlw   0x1
-		movwf   rdPressedCoordinate
-		bra poll_all_keys_common	    
-	    coor_0_2:
-		movlw   0x0
-		movwf   rbPressedCoordinate
-		movlw   0x2
-		movwf   rdPressedCoordinate
-		bra poll_all_keys_common	    
-	    coor_0_3:
-		movlw   0x0
-		movwf   rbPressedCoordinate
-		movlw   0x3
-		movwf   rdPressedCoordinate
-		bra poll_all_keys_common       
-	;***************************
-	;********* POLL COL2 *******
-	poll_col2:
-	    bsf	LATB, 0
-	    bcf	LATB, 1
-	    btfss	PORTD, 0
-		bra coor_1_0
-	    btfss	PORTD, 1
-		bra coor_1_1
-	    btfss	PORTD, 2
-		bra coor_1_2
-	    btfss	PORTD, 3
-		bra coor_1_3
-
-	    bra poll_col3
-
-	    coor_1_0:
-		movlw   0x1
-		movwf   rbPressedCoordinate
-		movlw   0x0
-		movwf   rdPressedCoordinate
-		bra poll_all_keys_common	    
-	    coor_1_1:
-		movlw   0x1
-		movwf   rbPressedCoordinate
-		movlw   0x1
-		movwf   rdPressedCoordinate
-		bra poll_all_keys_common	    
-	    coor_1_2:
-		movlw   0x1
-		movwf   rbPressedCoordinate
-		movlw   0x2
-		movwf   rdPressedCoordinate
-		bra poll_all_keys_common	    
-	    coor_1_3:
-		movlw   0x1
-		movwf   rbPressedCoordinate
-		movlw   0x3
-		movwf   rdPressedCoordinate
-		bra poll_all_keys_common       
-	;***************************
-	;********* POLL COL3 *******
-	poll_col3:
-	    bsf	LATB, 1
-	    bcf	LATB, 2
-	    btfss	PORTD, 0
-		bra coor_2_0
-	    btfss	PORTD, 1
-		bra coor_2_1
-	    btfss	PORTD, 2
-		bra coor_2_2
-	    btfss	PORTD, 3
-		bra coor_2_3
-
-	    goto restore_current_display
-
-	    coor_2_0:
-		movlw   0x2
-		movwf   rbPressedCoordinate
-		movlw   0x0
-		movwf   rdPressedCoordinate
-		bra poll_all_keys_common	    
-	    coor_2_1:
-		movlw   0x2
-		movwf   rbPressedCoordinate
-		movlw   0x1
-		movwf   rdPressedCoordinate
-		bra poll_all_keys_common	    
-	    coor_2_2:
-		movlw   0x2
-		movwf   rbPressedCoordinate
-		movlw   0x2
-		movwf   rdPressedCoordinate
-		bra poll_all_keys_common	    
-	    coor_2_3:
-		movlw   0x2
-		movwf   rbPressedCoordinate
-		movlw   0x3
-		movwf   rdPressedCoordinate
-		bra poll_all_keys_common       
-	;***************************	
-	poll_all_keys_common:    
-	    bcf	    isAnyKeyPressed, 0	; Change state into
-	    bsf	    isAnyKeyPressed, 1	; mightBePressed
-	    
-	    bsf		attentionRequired, 2	; Timer is set for KEYPAD
-						
-	    movlw	0x3C
-	    movwf	TMR1H
-	    movlw	0xB0
-	    movwf	TMR1L		; 0x3CB0 = 15536 is the initial value of Timer1
-	    bsf	T1CON, 0		; TMR1ON is set
-	    bsf	PIE1, 0			; TMR1IE is set
-	    
-	    goto restore_current_display
     
     rb4_action_detected:
 	bcf	attentionRequired, 0	; Attention is given, clear flag
@@ -773,6 +560,267 @@ writeState:
 	    call keypad_timer_detected
 	return
 	
+	goto	poll_keypad	; Then it must be time to poll KEYPAD
+	
+	poll_keypad:
+	    movlw   0x4
+	    movwf   pollCounter
+	    
+	    btfsc   isAnyKeyPressed, 0	    ; Is in definetlyReleased
+		call poll_all_keys	    ; Yes, poll all keys
+	    btfsc   isAnyKeyPressed, 2	    ; Is in definetlyPressed
+		call poll_specific_key	    ; Yes, poll the specific key
+	    return
+	    poll_all_keys:    
+		call save_current_display
+		
+		;********* POLL COL0 *******
+		poll_col0:
+		    bcf	LATB, 0
+		    btfss	PORTD, 0
+		    	bra coor_0_3
+		    btfss	PORTD, 1
+			bra coor_0_2
+		    btfss	PORTD, 2
+			bra coor_0_1
+		    btfss	PORTD, 3
+		    	bra coor_0_0
+		    
+		    bsf	LATB, 0
+		    bra poll_col1
+
+		    coor_0_0:
+			movlw   0x0
+			movwf   rbPressedCoordinate
+			movwf   rdPressedCoordinate
+			bra poll_all_keys_common	    
+		    coor_0_1:
+			movlw   0x0
+			movwf   rbPressedCoordinate
+			movlw   0x1
+			movwf   rdPressedCoordinate
+			bra poll_all_keys_common	    
+		    coor_0_2:
+			movlw   0x0
+			movwf   rbPressedCoordinate
+			movlw   0x2
+			movwf   rdPressedCoordinate
+			bra poll_all_keys_common	    
+		    coor_0_3:
+			movlw   0x0
+			movwf   rbPressedCoordinate
+			movlw   0x3
+			movwf   rdPressedCoordinate
+			bra poll_all_keys_common       
+		;***************************
+		;********* POLL COL1 *******
+		poll_col1:
+		    bcf	LATB, 1
+		    btfss	PORTD, 0
+		    	bra coor_1_3
+		    btfss	PORTD, 1
+			bra coor_1_2
+		    btfss	PORTD, 2
+			bra coor_1_1
+		    btfss	PORTD, 3
+		    	bra coor_1_0
+		    
+		    bsf	LATB, 1
+		    bra poll_col2
+
+		    coor_1_0:
+			movlw   0x1
+			movwf   rbPressedCoordinate
+			movlw   0x0
+			movwf   rdPressedCoordinate
+			bra poll_all_keys_common	    
+		    coor_1_1:
+			movlw   0x1
+			movwf   rbPressedCoordinate
+			movlw   0x1
+			movwf   rdPressedCoordinate
+			bra poll_all_keys_common	    
+		    coor_1_2:
+			movlw   0x1
+			movwf   rbPressedCoordinate
+			movlw   0x2
+			movwf   rdPressedCoordinate
+			bra poll_all_keys_common	    
+		    coor_1_3:
+			movlw   0x1
+			movwf   rbPressedCoordinate
+			movlw   0x3
+			movwf   rdPressedCoordinate
+			bra poll_all_keys_common       
+		;***************************
+		;********* POLL COL2 *******
+		poll_col2:
+		    bcf	LATB, 2
+		    btfss	PORTD, 0
+			bra coor_2_3		    
+		    btfss	PORTD, 1
+			bra coor_2_2
+		    btfss	PORTD, 2
+			bra coor_2_1
+		    btfss	PORTD, 3
+			bra coor_2_0
+		    
+		    bsf	LATB, 2
+		    goto restore_current_display
+
+		    coor_2_0:
+			movlw   0x2
+			movwf   rbPressedCoordinate
+			movlw   0x0
+			movwf   rdPressedCoordinate
+			bra poll_all_keys_common	    
+		    coor_2_1:
+			movlw   0x2
+			movwf   rbPressedCoordinate
+			movlw   0x1
+			movwf   rdPressedCoordinate
+			bra poll_all_keys_common	    
+		    coor_2_2:
+			movlw   0x2
+			movwf   rbPressedCoordinate
+			movlw   0x2
+			movwf   rdPressedCoordinate
+			bra poll_all_keys_common	    
+		    coor_2_3:
+			movlw   0x2
+			movwf   rbPressedCoordinate
+			movlw   0x3
+			movwf   rdPressedCoordinate
+			bra poll_all_keys_common       
+		;***************************	
+		poll_all_keys_common:    
+		    bcf	    isAnyKeyPressed, 0	; Change state into
+		    bsf	    isAnyKeyPressed, 1	; mightBePressed
+
+		    bsf		attentionRequired, 2	; Timer is set for KEYPAD
+		    bra poll_all_keys_set_timer1_again
+		    
+		poll_all_keys_set_timer1_again:
+		    movlw	0x3C
+		    movwf	TMR1H
+		    movlw	0xB0
+		    movwf	TMR1L		; 0x3CB0 = 15536 is the initial value of Timer1
+		    bsf	T1CON, 0		; TMR1ON is set
+		    bsf	PIE1, 0			; TMR1IE is set
+		    goto restore_current_display
+		    
+	    poll_specific_key:
+		call save_current_display
+
+		bsf	LATB, 0
+		bsf	LATB, 1
+		bsf	LATB, 2
+
+		btfsc	rbPressedCoordinate, 1	    ; is it on COL2
+		    bra check_col2_pressed_def
+		btfsc	rbPressedCoordinate, 0	    ; is it on COL1
+		    bra check_col1_pressed_def
+		bra	check_col0_pressed_def    	    ; then, must be on COL0 
+
+		check_col2_pressed_def:
+		    bcf	LATB, 2
+		    movf    rdPressedCoordinate, 0
+		    dcfsnz  WREG		    ; Is it ROW1
+			bra col2_row1_pressed_def    
+		    dcfsnz  WREG		    ; Is it ROW2
+			bra col2_row2_pressed_def
+		    dcfsnz  WREG		    ; Is it ROW3
+			bra col2_row3_pressed_def
+		    bra col2_row0_pressed_def	    ; Then, must be ROW0
+
+		    col2_row0_pressed_def:
+			movf	    PORTD, 0
+			btfss	    PORTD, 3
+			;btfss	    PORTD, 3
+			    goto restore_current_display
+			nop
+			goto poll_specific_key_common
+		    col2_row1_pressed_def:
+			btfss	    PORTD, 2
+			    goto restore_current_display
+			goto poll_specific_key_common
+		    col2_row2_pressed_def:
+			btfss	    PORTD, 1
+			    goto restore_current_display
+			goto poll_specific_key_common
+		    col2_row3_pressed_def:
+			btfss	    PORTD, 0
+			    goto restore_current_display
+			goto poll_specific_key_common		    
+		check_col1_pressed_def:
+		    bcf	LATB, 1
+		    movf    rdPressedCoordinate, 0
+		    dcfsnz  WREG		    ; Is it ROW1
+			bra col1_row1_pressed_def    
+		    dcfsnz  WREG		    ; Is it ROW2
+			bra col1_row2_pressed_def
+		    dcfsnz  WREG		    ; Is it ROW3
+			bra col1_row3_pressed_def
+		    bra col1_row0_pressed_def	    ; Then, must be ROW0
+
+		    col1_row0_pressed_def:
+			btfss	    PORTD, 3
+			    goto restore_current_display
+			goto poll_specific_key_common
+		    col1_row1_pressed_def:
+			btfss	    PORTD, 2
+			    goto restore_current_display
+			goto poll_specific_key_common
+		    col1_row2_pressed_def:
+			btfss	    PORTD, 1
+			    goto restore_current_display
+			goto poll_specific_key_common
+		    col1_row3_pressed_def:
+			btfss	    PORTD, 0
+			    goto restore_current_display
+			goto poll_specific_key_common
+		check_col0_pressed_def:
+		    bcf	LATB, 0
+		    movf    rdPressedCoordinate, 0
+		    dcfsnz  WREG		    ; Is it ROW1
+			bra col0_row1_pressed_def
+		    dcfsnz  WREG		    ; Is it ROW2
+			bra col0_row2_pressed_def
+		    dcfsnz  WREG		    ; Is it ROW3
+			bra col0_row3_pressed_def
+		    bra col0_row0_pressed_def   ; Then, must be ROW0
+
+		    col0_row0_pressed_def:
+			btfss	    PORTD, 3
+			    goto restore_current_display
+			goto poll_specific_key_common
+		    col0_row1_pressed_def:
+			btfss	    PORTD, 2
+			    goto restore_current_display
+			goto poll_specific_key_common
+		    col0_row2_pressed_def:
+			btfss	    PORTD, 1
+			    goto restore_current_display
+			goto poll_specific_key_common
+		    col0_row3_pressed_def:
+			btfss	    PORTD, 0
+			    goto restore_current_display
+			goto poll_specific_key_common
+		poll_specific_key_common:    
+		    bcf	isAnyKeyPressed, 2	; Change state into
+		    bsf	isAnyKeyPressed, 3	; mightBeReleased	   
+
+		    bsf		attentionRequired, 2	; Timer is set for KEYPAD
+		    bra poll_specific_key_set_timer1_again
+		poll_specific_key_set_timer1_again:
+		    movlw	0x3C
+		    movwf	TMR1H
+		    movlw	0xB0
+		    movwf	TMR1L		; 0x3CB0 = 15536 is the initial value of Timer1
+		    bsf	T1CON, 0		; TMR1ON is set
+		    bsf	PIE1, 0			; TMR1IE is set
+
+		    goto restore_current_display
 	keypad_timer_detected:
 	    call save_current_display
 	    
@@ -806,28 +854,28 @@ writeState:
 		    bra col2_row0_pressed	    ; Then, must be ROW0
 		    
 		    col2_row0_pressed:
-			btfsc	    PORTD, 0
+			btfsc	    PORTD, 3
 			    goto    goBack_definetlyReleased_keypad
 			
 			bcf	isAnyKeyPressed, 1
 			bsf	isAnyKeyPressed, 2
 			goto restore_current_display
 		    col2_row1_pressed:
-			btfsc	    PORTD, 1
-			    goto    goBack_definetlyReleased_keypad
-			
-			bcf	isAnyKeyPressed, 1
-			bsf	isAnyKeyPressed, 2
-			goto restore_current_display
-		    col2_row2_pressed:
 			btfsc	    PORTD, 2
 			    goto    goBack_definetlyReleased_keypad
 			
 			bcf	isAnyKeyPressed, 1
 			bsf	isAnyKeyPressed, 2
 			goto restore_current_display
+		    col2_row2_pressed:
+			btfsc	    PORTD, 1
+			    goto    goBack_definetlyReleased_keypad
+			
+			bcf	isAnyKeyPressed, 1
+			bsf	isAnyKeyPressed, 2
+			goto restore_current_display
 		    col2_row3_pressed:
-			btfsc	    PORTD, 3
+			btfsc	    PORTD, 0
 			    goto    goBack_definetlyReleased_keypad
 			
 			bcf	isAnyKeyPressed, 1
@@ -845,28 +893,28 @@ writeState:
 		    bra col1_row0_pressed	    ; Then, must be ROW0
 		    
 		    col1_row0_pressed:
-			btfsc	    PORTD, 0
+			btfsc	    PORTD, 3
 			    goto    goBack_definetlyReleased_keypad
 			
 			bcf	isAnyKeyPressed, 1
 			bsf	isAnyKeyPressed, 2
 			goto restore_current_display
 		    col1_row1_pressed:
-			btfsc	    PORTD, 1
-			    goto    goBack_definetlyReleased_keypad
-			
-			bcf	isAnyKeyPressed, 1
-			bsf	isAnyKeyPressed, 2
-			goto restore_current_display
-		    col1_row2_pressed:
 			btfsc	    PORTD, 2
 			    goto    goBack_definetlyReleased_keypad
 			
 			bcf	isAnyKeyPressed, 1
 			bsf	isAnyKeyPressed, 2
 			goto restore_current_display
+		    col1_row2_pressed:
+			btfsc	    PORTD, 1
+			    goto    goBack_definetlyReleased_keypad
+			
+			bcf	isAnyKeyPressed, 1
+			bsf	isAnyKeyPressed, 2
+			goto restore_current_display
 		    col1_row3_pressed:
-			btfsc	    PORTD, 3
+			btfsc	    PORTD, 0
 			    goto    goBack_definetlyReleased_keypad
 			
 			bcf	isAnyKeyPressed, 1
@@ -884,28 +932,28 @@ writeState:
 		    bra col0_row0_pressed	    ; Then, must be ROW0
 		    
 		    col0_row0_pressed:
-			btfsc	    PORTD, 0
+			btfsc	    PORTD, 3
 			    goto    goBack_definetlyReleased_keypad
 			
 			bcf	isAnyKeyPressed, 1
 			bsf	isAnyKeyPressed, 2
 			goto restore_current_display
 		    col0_row1_pressed:
-			btfsc	    PORTD, 1
-			    goto    goBack_definetlyReleased_keypad
-			
-			bcf	isAnyKeyPressed, 1
-			bsf	isAnyKeyPressed, 2
-			goto restore_current_display
-		    col0_row2_pressed:
 			btfsc	    PORTD, 2
 			    goto    goBack_definetlyReleased_keypad
 			
 			bcf	isAnyKeyPressed, 1
 			bsf	isAnyKeyPressed, 2
 			goto restore_current_display
+		    col0_row2_pressed:
+			btfsc	    PORTD, 1
+			    goto    goBack_definetlyReleased_keypad
+			
+			bcf	isAnyKeyPressed, 1
+			bsf	isAnyKeyPressed, 2
+			goto restore_current_display
 		    col0_row3_pressed:
-			btfsc	    PORTD, 3
+			btfsc	    PORTD, 0
 			    goto    goBack_definetlyReleased_keypad
 			
 			bcf	isAnyKeyPressed, 1
@@ -938,15 +986,84 @@ writeState:
 		    bra col2_row0_released	    ; Then, must be ROW0
 		    
 		    col2_row0_released:
-			btfss	    PORTD, 0
-			    goto    goBack_definetlyPressed_keypad			
-			goto keypad_mightBeReleased_common
+			btfss	    PORTD, 3
+			    goto    goBack_definetlyPressed_keypad	
+			    
+			    
+			movlw	0x03
+			cpfseq	currentPushedButton	; Is it the same button
+			    bra	col2_row0_released_diff	; No, it is not
+			bra col2_row0_released_same	; Yes, it is
+			
+			col2_row0_released_same:
+			    incf    currentModulo	; Same button then increment
+			    
+			    movlw   0x03
+			    cpfslt  currentModulo	; Is it 3
+				clrf	currentModulo	; Yes, then cycle back to 0
+			    goto keypad_mightBeReleased_common
+			    
+			col2_row0_released_diff:
+			    movlw   0x00
+			    cpfsgt  currentPushedButton		; Is another button was pushed ?
+				bra col2_row0_released_diff_new	; No, then current place
+			    bra	col2_row0_released_diff_another	; Yes, then first commit
+			    
+			    col2_row0_released_diff_new:
+				movlw	0x03
+				movwf	currentPushedButton	; Change pushed button as this button
+				clrf	currentModulo		; First press, modulo is 0
+				
+				goto keypad_mightBeReleased_common		
+				
+			    col2_row0_released_diff_another:
+				call commit_current_letter
+				
+				movlw	0x03
+				movwf	currentPushedButton	; Change pushed button as this button
+				clrf	currentModulo		; First press, modulo is 0
+				
+				goto keypad_mightBeReleased_common
 		    col2_row1_released:
-			btfss	    PORTD, 1
+			btfss	    PORTD, 0
 			    goto    goBack_definetlyPressed_keypad
-			goto keypad_mightBeReleased_common
+			    
+			movlw	0x06
+			cpfseq	currentPushedButton	; Is it the same button
+			    bra	col2_row1_released_diff	; No, it is not
+			bra col2_row1_released_same	; Yes, it is
+			
+			col2_row1_released_same:
+			    incf    currentModulo	; Same button then increment
+			    
+			    movlw   0x03
+			    cpfslt  currentModulo	; Is it 3
+				clrf	currentModulo	; Yes, then cycle back to 0
+			    goto keypad_mightBeReleased_common
+			    
+			col2_row1_released_diff:
+			    movlw   0x00
+			    cpfsgt  currentPushedButton		; Is another button was pushed ?
+				bra col2_row1_released_diff_new	; No, then current place
+			    bra	col2_row1_released_diff_another	; Yes, then first commit
+			    
+			    col2_row1_released_diff_new:
+				movlw	0x06
+				movwf	currentPushedButton	; Change pushed button as this button
+				clrf	currentModulo		; First press, modulo is 0
+				
+				goto keypad_mightBeReleased_common		
+				
+			    col2_row1_released_diff_another:
+				call commit_current_letter
+				
+				movlw	0x06
+				movwf	currentPushedButton	; Change pushed button as this button
+				clrf	currentModulo		; First press, modulo is 0
+				
+				goto keypad_mightBeReleased_common
 		    col2_row2_released:
-			btfss	    PORTD, 2
+			btfss	    PORTD, 1
 			    goto    goBack_definetlyPressed_keypad
 			
 			movlw	0x09
@@ -984,7 +1101,7 @@ writeState:
 				
 				goto keypad_mightBeReleased_common
 		    col2_row3_released:
-			btfss	    PORTD, 3
+			btfss	    PORTD, 0
 			    goto    goBack_definetlyPressed_keypad
 			goto keypad_mightBeReleased_common	
 		check_col1_released:
@@ -999,21 +1116,121 @@ writeState:
 		    bra col1_row0_released	    ; Then, must be ROW0
 		    
 		    col1_row0_released:
-			btfss	    PORTD, 0
-			    goto    goBack_definetlyPressed_keypad
-			goto keypad_mightBeReleased_common
-		    col1_row1_released:
-			btfss	    PORTD, 1
-			    goto    goBack_definetlyPressed_keypad
-			goto keypad_mightBeReleased_common
-		    col1_row2_released:
-			btfss	    PORTD, 2
-			    goto    goBack_definetlyPressed_keypad
-			goto keypad_mightBeReleased_common
-		    col1_row3_released:
 			btfss	    PORTD, 3
 			    goto    goBack_definetlyPressed_keypad
-			goto keypad_mightBeReleased_common
+			    
+			movlw	0x02
+			cpfseq	currentPushedButton	; Is it the same button
+			    bra	col1_row0_released_diff	; No, it is not
+			bra col1_row0_released_same	; Yes, it is
+			
+			col1_row0_released_same:
+			    incf    currentModulo	; Same button then increment
+			    
+			    movlw   0x03
+			    cpfslt  currentModulo	; Is it 3
+				clrf	currentModulo	; Yes, then cycle back to 0
+			    goto keypad_mightBeReleased_common
+			    
+			col1_row0_released_diff:
+			    movlw   0x00
+			    cpfsgt  currentPushedButton		; Is another button was pushed ?
+				bra col1_row0_released_diff_new	; No, then current place
+			    bra	col1_row0_released_diff_another	; Yes, then first commit
+			    
+			    col1_row0_released_diff_new:
+				movlw	0x02
+				movwf	currentPushedButton	; Change pushed button as this button
+				clrf	currentModulo		; First press, modulo is 0
+				
+				goto keypad_mightBeReleased_common		
+				
+			    col1_row0_released_diff_another:
+				call commit_current_letter
+				
+				movlw	0x02
+				movwf	currentPushedButton	; Change pushed button as this button
+				clrf	currentModulo		; First press, modulo is 0
+				
+				goto keypad_mightBeReleased_common
+		    col1_row1_released:
+			btfss	    PORTD, 2
+			    goto    goBack_definetlyPressed_keypad
+			
+			movlw	0x05
+			cpfseq	currentPushedButton	; Is it the same button
+			    bra	col1_row1_released_diff	; No, it is not
+			bra col1_row1_released_same	; Yes, it is
+			
+			col1_row1_released_same:
+			    incf    currentModulo	; Same button then increment
+			    
+			    movlw   0x03
+			    cpfslt  currentModulo	; Is it 3
+				clrf	currentModulo	; Yes, then cycle back to 0
+			    goto keypad_mightBeReleased_common
+			    
+			col1_row1_released_diff:
+			    movlw   0x00
+			    cpfsgt  currentPushedButton		; Is another button was pushed ?
+				bra col1_row1_released_diff_new	; No, then current place
+			    bra	col1_row1_released_diff_another	; Yes, then first commit
+			    
+			    col1_row1_released_diff_new:
+				movlw	0x05
+				movwf	currentPushedButton	; Change pushed button as this button
+				clrf	currentModulo		; First press, modulo is 0
+				
+				goto keypad_mightBeReleased_common		
+				
+			    col1_row1_released_diff_another:
+				call commit_current_letter
+				
+				movlw	0x05
+				movwf	currentPushedButton	; Change pushed button as this button
+				clrf	currentModulo		; First press, modulo is 0
+				
+				goto keypad_mightBeReleased_common
+		    col1_row2_released:
+			btfss	    PORTD, 1
+			    goto    goBack_definetlyPressed_keypad
+			
+			movlw	0x08
+			cpfseq	currentPushedButton	; Is it the same button
+			    bra	col1_row2_released_diff	; No, it is not
+			bra col1_row2_released_same	; Yes, it is
+			
+			col1_row2_released_same:
+			    incf    currentModulo	; Same button then increment
+			    
+			    movlw   0x03
+			    cpfslt  currentModulo	; Is it 3
+				clrf	currentModulo	; Yes, then cycle back to 0
+			    goto keypad_mightBeReleased_common
+			    
+			col1_row2_released_diff:
+			    movlw   0x00
+			    cpfsgt  currentPushedButton		; Is another button was pushed ?
+				bra col1_row2_released_diff_new	; No, then current place
+			    bra	col1_row2_released_diff_another	; Yes, then first commit
+			    
+			    col1_row2_released_diff_new:
+				movlw	0x08
+				movwf	currentPushedButton	; Change pushed button as this button
+				clrf	currentModulo		; First press, modulo is 0
+				
+				goto keypad_mightBeReleased_common		
+				
+			    col1_row2_released_diff_another:
+				call commit_current_letter
+				
+				movlw	0x08
+				movwf	currentPushedButton	; Change pushed button as this button
+				clrf	currentModulo		; First press, modulo is 0
+				
+				goto keypad_mightBeReleased_common
+		    col1_row3_released:
+			; shouldn't be here
 		check_col0_released:
 		    bcf	LATB, 0
 		    movf    rdPressedCoordinate, 0
@@ -1026,15 +1243,47 @@ writeState:
 		    bra col0_row0_released	    ; Then, must be ROW0
 		    
 		    col0_row0_released:
-			btfss	    PORTD, 0
-			    goto    goBack_definetlyPressed_keypad
-			goto keypad_mightBeReleased_common
+			; shouldn't be here
 		    col0_row1_released:
-			btfss	    PORTD, 1
-			    goto    goBack_definetlyPressed_keypad
-			goto keypad_mightBeReleased_common
-		    col0_row2_released:
 			btfss	    PORTD, 2
+			    goto    goBack_definetlyPressed_keypad
+			    
+			movlw	0x04
+			cpfseq	currentPushedButton	; Is it the same button
+			    bra	col0_row1_released_diff	; No, it is not
+			bra col0_row1_released_same	; Yes, it is
+			
+			col0_row1_released_same:
+			    incf    currentModulo	; Same button then increment
+			    
+			    movlw   0x03
+			    cpfslt  currentModulo	; Is it 3
+				clrf	currentModulo	; Yes, then cycle back to 0
+			    goto keypad_mightBeReleased_common
+			    
+			col0_row1_released_diff:
+			    movlw   0x00
+			    cpfsgt  currentPushedButton		; Is another button was pushed ?
+				bra col0_row1_released_diff_new	; No, then current place
+			    bra	col0_row1_released_diff_another	; Yes, then first commit
+			    
+			    col0_row1_released_diff_new:
+				movlw	0x04
+				movwf	currentPushedButton	; Change pushed button as this button
+				clrf	currentModulo		; First press, modulo is 0
+				
+				goto keypad_mightBeReleased_common		
+				
+			    col0_row1_released_diff_another:
+				call commit_current_letter
+				
+				movlw	0x04
+				movwf	currentPushedButton	; Change pushed button as this button
+				clrf	currentModulo		; First press, modulo is 0
+				
+				goto keypad_mightBeReleased_common
+		    col0_row2_released:
+			btfss	    PORTD, 1
 			    goto    goBack_definetlyPressed_keypad
 			
 			movlw	0x07
@@ -1072,9 +1321,7 @@ writeState:
 				
 				goto keypad_mightBeReleased_common
 		    col0_row3_released:
-			btfss	    PORTD, 3
-			    goto    goBack_definetlyPressed_keypad			
-			goto keypad_mightBeReleased_common
+			; shouldn't be here
 		goBack_definetlyPressed_keypad:
 		    bcf	isAnyKeyPressed, 3
 		    bsf	isAnyKeyPressed, 2
@@ -1224,12 +1471,13 @@ writeState:
 	    
 	    movf    currentPushedButton, 0
 	    mullw   0x03
+	    movf    PRODL, 0
 	    addwf   currentModulo, 0
 	    
 	    rlncf   WREG, f
 	    call    load_letter_for_display_into_w
 	    movwf   LATD
-	    bsf	    LATA, 4	    ; Select third screen
+	    bsf	    LATA, 5	    ; Select fourth screen
 
 	    clrf	whichScreen
 	    bsf	whichScreen, 0	; Next, Screen3 will be drawn
