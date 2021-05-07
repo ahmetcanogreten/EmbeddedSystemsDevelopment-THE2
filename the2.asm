@@ -265,8 +265,47 @@ wait_for_n_times_10ms:  ;n * 10ms (9.98 ms in fact)
     return   
 
 
-   
+set_letters:
+    movlw   0x2
+    mullw   0x3
+    movf    PRODL, 0
+    addlw   0x2
+    movwf   letter_1
     
+    movlw   0x3
+    mullw   0x3
+    movf    PRODL, 0
+    addlw   0x1
+    movwf   letter_2
+    
+    movlw   0x6
+    mullw   0x3
+    movf    PRODL, 0
+    addlw   0x1
+    movwf   letter_3    
+    
+    movlw   0x4
+    mullw   0x3
+    movf    PRODL, 0
+    addlw   0x0
+    movwf   letter_4
+    
+    movlw   0x8
+    mullw   0x3
+    movf    PRODL, 0
+    addlw   0x0
+    movwf   letter_5
+    
+    movlw   0x8
+    mullw   0x3
+    movf    PRODL, 0
+    addlw   0x0
+    movwf   letter_6
+    
+    clrf    outerState
+    bsf	    outerState, 2
+    bsf	    reviewStateLeftMostLetter, 0
+    return
     
 main:
     btfsc   attentionRequired, 0    ; Did rb4 changed state ?
@@ -283,6 +322,28 @@ main:
 	goto reviewState	    ; Yes, go to reviewState
     btfsc   outerState, 3   ; Is in readState ?
 	goto readState	    ; Yes, go to readState
+    
+set_timer1_debouncing:
+    ;***** TIMER1 SETUP (for debouncing of RB4 and KEYPAD, 10ms is set in ISR)******
+	clrf	    T1CON
+	bsf	    T1CON, 4		; 1:2 Prescale set
+	bsf	    INTCON, 6		; Peripheral Interrupts Enabled
+	
+;	movlw	0x3C
+;	movwf	TMR1H
+;	movlw	0xB0
+;	movwf	TMR1L		; 0x3CB0 = 15536 is the initial value of Timer1
+;	bsf	T1CON, 0		; TMR1ON is set
+;	bsf	PIE1, 0			; TMR1IE is set
+	;************************
+	
+    movlw	0x3C
+    movwf	TMR1H
+    movlw	0xB0
+    movwf	TMR1L		; 0x3CB0 = 15536 is the initial value of Timer1
+    bsf	T1CON, 0	; TMR1ON is set
+    bsf	PIE1, 0		; TMR1IE is set
+    return
     
 initialState:
     
@@ -450,6 +511,7 @@ initialState:
 	bsf	    INTCON, 7	    ; Enable GIE
 	;************************	
 	
+	call set_letters
 	bra	main	
 	
         
@@ -569,12 +631,8 @@ writeState:
 	    bsf		attentionRequired, 1	; Timer is set for RB4)
 						; this bit says that timer is for
 						; debouncing effect of rb4
-	    movlw	0x3C
-	    movwf	TMR1H
-	    movlw	0xB0
-	    movwf	TMR1L		; 0x3CB0 = 15536 is the initial value of Timer1
-	    bsf	T1CON, 0	; TMR1ON is set
-	    bsf	PIE1, 0		; TMR1IE is set
+	    
+	    call set_timer1_debouncing
 	    
 	    return
 	    
@@ -609,9 +667,17 @@ writeState:
 		bsf	LATB, 1
 		bsf	LATB, 2	
 		
-		btfsc	rbPressedCoordinate, 1	    ; is it RIGHT (COL2)
-		    bra check_right_pressed		
-		bra	check_left_pressed    	    ; Then, must be LEFT (COL0)
+		movf	rbPressedCoordinate, 0
+		incf	WREG
+		
+		dcfsnz	WREG			    ; Is it LEFT (COL0)
+		    bra	check_left_pressed 
+		decf	WREG
+		dcfsnz	WREG			    ; Is it RIGHT (COL2)
+		    bra check_right_pressed
+		    
+		goto    back_definetlyReleased_review
+		
 		
 		
 		check_right_pressed:
@@ -641,30 +707,36 @@ writeState:
 		bsf	LATB, 1
 		bsf	LATB, 2
 		
-		btfsc	rbPressedCoordinate, 1	    ; is it RIGHT (COL2)
-		    bra check_right_released		
-		bra	check_left_released    	    ; Then, must be LEFT (COL0)
+		movf	rbPressedCoordinate, 0
+		incf	WREG
 		
+		dcfsnz	WREG			    ; Is it LEFT (COL0)
+		    bra	check_left_released 	
+		decf	WREG
+		dcfsnz	WREG			    ; Is it RIGHT (COL2)
+		    bra check_right_released		
+		
+		goto    back_definetlyPressed_review
 		check_right_released:
 		    bcf	LATB, 2
-			btfss	    PORTD, 0
-			    goto    back_definetlyPressed_review
-			
-			movlw	0x3
-			cpfseq	reviewStateLeftMostLetter
-			    incf    reviewStateLeftMostLetter
-			    
-			goto mightBeReleased_com_reviewState					
+		    btfss	    PORTD, 0
+			goto    back_definetlyPressed_review
+
+		    movlw	0x3
+		    cpfseq	reviewStateLeftMostLetter
+			incf    reviewStateLeftMostLetter
+
+		    goto mightBeReleased_com_reviewState					
 		check_left_released:
 		    bcf	LATB, 0
-			btfss	    PORTD, 0
-			    goto    back_definetlyPressed_review
-			
-			movlw	0x1
-			cpfseq	reviewStateLeftMostLetter
-			    decf    reviewStateLeftMostLetter
-			    
-			goto mightBeReleased_com_reviewState	
+		    btfss	    PORTD, 0
+			goto    back_definetlyPressed_review
+
+		    movlw	0x1
+		    cpfseq	reviewStateLeftMostLetter
+			decf    reviewStateLeftMostLetter
+
+		    goto mightBeReleased_com_reviewState	
 		back_definetlyPressed_review:
 		    bcf	isAnyKeyPressed, 3
 		    bsf	isAnyKeyPressed, 2
@@ -835,12 +907,9 @@ writeState:
 		    bra poll_all_keys_set_timer1_again
 		    
 		poll_all_keys_set_timer1_again:
-		    movlw	0x3C
-		    movwf	TMR1H
-		    movlw	0xB0
-		    movwf	TMR1L		; 0x3CB0 = 15536 is the initial value of Timer1
-		    bsf	T1CON, 0		; TMR1ON is set
-		    bsf	PIE1, 0			; TMR1IE is set
+    
+		    call set_timer1_debouncing
+		    
 		    goto restore_current_display
 		    
 	    poll_specific_key:
@@ -850,15 +919,21 @@ writeState:
 		bsf	LATB, 1
 		bsf	LATB, 2
 		
-		btfss	outerState, 2			    ; Is it in reviewState
+		btfsc	outerState, 2			    ; Is it in reviewState
 		    bra poll_specific_key_in_reviewState    ; Yes, 
 		    
 						    ; No,
-		btfsc	rbPressedCoordinate, 1	    ; is it on COL2
-		    bra check_col2_pressed_def
-		btfsc	rbPressedCoordinate, 0	    ; is it on COL1
+		movf	rbPressedCoordinate, 0
+		incf	WREG
+		
+		dcfsnz	WREG	; Is it on COL0
+		    bra check_col0_pressed_def 
+		dcfsnz	WREG	; Is it on COL1
 		    bra check_col1_pressed_def
-		bra	check_col0_pressed_def    	    ; then, must be on COL0 
+		dcfsnz	WREG	; Is it on COL2
+		    bra check_col2_pressed_def
+		
+		goto restore_current_display
 		
 		poll_specific_key_in_reviewState:
 		    btfsc   rbPressedCoordinate, 1	; Is it RIGHT button
@@ -868,15 +943,18 @@ writeState:
 		    
 		check_col2_pressed_def:
 		    bcf	LATB, 2
+		    
 		    movf    rdPressedCoordinate, 0
+		    incf    WREG
+			
+		    dcfsnz  WREG		    ; Is it ROW0
+			bra col2_row0_pressed_def	     
 		    dcfsnz  WREG		    ; Is it ROW1
 			bra col2_row1_pressed_def    
 		    dcfsnz  WREG		    ; Is it ROW2
 			bra col2_row2_pressed_def
-		    decf    WREG
-		    ;dcfsnz  WREG		    ; Is it ROW3
-			;bra col2_row3_pressed_def
-		    bra col2_row0_pressed_def	    ; Then, must be ROW0
+		    
+		    goto restore_current_display
 
 		    col2_row0_pressed_def:
 			movf	    PORTD, 0
@@ -900,15 +978,19 @@ writeState:
 			goto poll_specific_key_common		    
 		check_col1_pressed_def:
 		    bcf	LATB, 1
+		    
 		    movf    rdPressedCoordinate, 0
+		    incf    WREG
+		    
+		    dcfsnz  WREG		    ; Is it ROW0
+			bra col1_row0_pressed_def   
 		    dcfsnz  WREG		    ; Is it ROW1
 			bra col1_row1_pressed_def    
 		    dcfsnz  WREG		    ; Is it ROW2
 			bra col1_row2_pressed_def
-		    decf    WREG
-		    ;dcfsnz  WREG		    ; Is it ROW3
-		    ;	bra col1_row3_pressed_def
-		    bra col1_row0_pressed_def	    ; Then, must be ROW0
+		    
+		    goto restore_current_display
+			
 
 		    col1_row0_pressed_def:
 			btfss	    PORTD, 3
@@ -924,25 +1006,27 @@ writeState:
 			goto poll_specific_key_common
 		    col1_row3_pressed_def:
 			; shouldn't be here
-			btfss	    PORTD, 0
-			    goto restore_current_display
-			goto poll_specific_key_common
+			goto restore_current_display
 		check_col0_pressed_def:
 		    bcf	LATB, 0
+		    
 		    movf    rdPressedCoordinate, 0
+		    incf    WREG
+		    
+		    dcfsnz  WREG		    ; Is it ROW0
+			bra col0_row0_pressed_def   
 		    dcfsnz  WREG		    ; Is it ROW1
 			bra col0_row1_pressed_def
 		    dcfsnz  WREG		    ; Is it ROW2
 			bra col0_row2_pressed_def
 		    dcfsnz  WREG		    ; Is it ROW3
 			bra col0_row3_pressed_def
-		    bra col0_row0_pressed_def   ; Then, must be ROW0
+			
+		    goto restore_current_display
 
 		    col0_row0_pressed_def:
 			; shouldn't be here
-			btfss	    PORTD, 3
-			    goto restore_current_display
-			goto poll_specific_key_common
+			goto restore_current_display
 		    col0_row1_pressed_def:
 			btfss	    PORTD, 2
 			    goto restore_current_display
@@ -962,12 +1046,7 @@ writeState:
 
 		    bsf		attentionRequired, 2	; Timer is set for KEYPAD
 		    
-		    movlw	0x3C
-		    movwf	TMR1H
-		    movlw	0xB0
-		    movwf	TMR1L		; 0x3CB0 = 15536 is the initial value of Timer1
-		    bsf	T1CON, 0		; TMR1ON is set
-		    bsf	PIE1, 0			; TMR1IE is set
+		    call set_timer1_debouncing
 
 		    goto restore_current_display
 	keypad_timer_in_writeState:
@@ -985,23 +1064,34 @@ writeState:
 		bsf	LATB, 1
 		bsf	LATB, 2
 		
-		btfsc	rbPressedCoordinate, 1	    ; is it on COL2
-		    bra check_col2_pressed
-		btfsc	rbPressedCoordinate, 0	    ; is it on COL1
+		movf	rbPressedCoordinate, 0
+		incf	WREG
+		
+		dcfsnz	WREG	    ; is it COL0
+		    bra check_col0_pressed
+		dcfsnz	WREG	    ; is it COL1
 		    bra check_col1_pressed
-		bra	check_col0_pressed    	    ; then, must be on COL0 
+		dcfsnz	WREG	    ; is it COL2
+		    bra check_col2_pressed
+		
+		goto goBack_definetlyReleased_keypad
 		
 		check_col2_pressed:
 		    bcf	LATB, 2
+		    
 		    movf    rdPressedCoordinate, 0
+		    incf    WREG
+		    
+		    dcfsnz  WREG		    ; Is it ROW0
+			bra col2_row0_pressed	  
 		    dcfsnz  WREG		    ; Is it ROW1
 			bra col2_row1_pressed    
 		    dcfsnz  WREG		    ; Is it ROW2
 			bra col2_row2_pressed
 		    dcfsnz  WREG		    ; Is it ROW3
 			bra col2_row3_pressed
-		    bra col2_row0_pressed	    ; Then, must be ROW0
 		    
+		    goto    goBack_definetlyReleased_keypad
 		    col2_row0_pressed:
 			btfsc	    PORTD, 3
 			    goto    goBack_definetlyReleased_keypad
@@ -1025,22 +1115,23 @@ writeState:
 			goto restore_current_display
 		    col2_row3_pressed:
 			; shouldn't be here
-			btfsc	    PORTD, 0
-			    goto    goBack_definetlyReleased_keypad
-			
-			bcf	isAnyKeyPressed, 1
-			bsf	isAnyKeyPressed, 2
-			goto restore_current_display		    
+			goto goBack_definetlyReleased_keypad	    
 		check_col1_pressed:
 		    bcf	LATB, 1
+		    
 		    movf    rdPressedCoordinate, 0
+		    incf    WREG
+		    
+		    dcfsnz  WREG		    ; Is it ROW0
+			bra col1_row0_pressed	    
 		    dcfsnz  WREG		    ; Is it ROW1
 			bra col1_row1_pressed    
 		    dcfsnz  WREG		    ; Is it ROW2
 			bra col1_row2_pressed
 		    dcfsnz  WREG		    ; Is it ROW3
 			bra col1_row3_pressed
-		    bra col1_row0_pressed	    ; Then, must be ROW0
+		    
+		    goto    goBack_definetlyReleased_keypad		    
 		    
 		    col1_row0_pressed:
 			btfsc	    PORTD, 3
@@ -1065,31 +1156,26 @@ writeState:
 			goto restore_current_display
 		    col1_row3_pressed:
 			; shouldn't be here
-			btfsc	    PORTD, 0
-			    goto    goBack_definetlyReleased_keypad
-			
-			bcf	isAnyKeyPressed, 1
-			bsf	isAnyKeyPressed, 2
-			goto restore_current_display
+			goto goBack_definetlyReleased_keypad
 		check_col0_pressed:
 		    bcf	LATB, 0
+		    
 		    movf    rdPressedCoordinate, 0
+		    incf    WREG
+			
+		    dcfsnz  WREG		    ; Is it ROW0
+			bra col0_row0_pressed	
 		    dcfsnz  WREG		    ; Is it ROW1
 			bra col0_row1_pressed    
 		    dcfsnz  WREG		    ; Is it ROW2
 			bra col0_row2_pressed
 		    dcfsnz  WREG		    ; Is it ROW3
 			bra col0_row3_pressed
-		    bra col0_row0_pressed	    ; Then, must be ROW0
 		    
+		    goto    goBack_definetlyReleased_keypad
 		    col0_row0_pressed:
 			; shouldn't be here
-			btfsc	    PORTD, 3
-			    goto    goBack_definetlyReleased_keypad
-			
-			bcf	isAnyKeyPressed, 1
-			bsf	isAnyKeyPressed, 2
-			goto restore_current_display
+			goto goBack_definetlyReleased_keypad
 		    col0_row1_pressed:
 			btfsc	    PORTD, 2
 			    goto    goBack_definetlyReleased_keypad
@@ -1106,12 +1192,7 @@ writeState:
 			goto restore_current_display
 		    col0_row3_pressed:
 			; shouldn't be here
-			btfsc	    PORTD, 0
-			    goto    goBack_definetlyReleased_keypad
-			
-			bcf	isAnyKeyPressed, 1
-			bsf	isAnyKeyPressed, 2
-			goto restore_current_display
+			goto goBack_definetlyReleased_keypad
 		goBack_definetlyReleased_keypad:
 			bcf	isAnyKeyPressed, 1
 			bsf	isAnyKeyPressed, 0
@@ -1121,22 +1202,36 @@ writeState:
 		bsf	LATB, 1
 		bsf	LATB, 2
 		
-		btfsc	rbPressedCoordinate, 1	    ; is it on COL2
-		    bra check_col2_released
-		btfsc	rbPressedCoordinate, 0	    ; is it on COL1
+		movf	rbPressedCoordinate, 0
+		incf	WREG
+		
+		dcfsnz	WREG		    ; Is it on COL0
+		    bra	check_col0_released   	    ; then, must be on COL0 
+		dcfsnz	WREG		    ; Is it on COL1
 		    bra check_col1_released
-		bra	check_col0_released   	    ; then, must be on COL0 
+		dcfsnz	WREG		    ; Is it on COL2
+		    bra check_col2_released
+		    
+		goto    goBack_definetlyPressed_keypad	
+		
 		
 		check_col2_released:
 		    bcf	LATB, 2
+		    
+		    
 		    movf    rdPressedCoordinate, 0
+		    incf    WREG
+		    
+		    dcfsnz  WREG		    ; Is it ROW0
+			bra col2_row0_released
 		    dcfsnz  WREG		    ; Is it ROW1
 			bra col2_row1_released
 		    dcfsnz  WREG		    ; Is it ROW2
 			bra col2_row2_released
 		    dcfsnz  WREG		    ; Is it ROW3
 			bra col2_row3_released
-		    bra col2_row0_released	    ; Then, must be ROW0
+		    
+		    goto    goBack_definetlyPressed_keypad
 		    
 		    col2_row0_released:
 			btfss	    PORTD, 3
@@ -1257,16 +1352,24 @@ writeState:
 			; shouldn't be here	
 		check_col1_released:
 		    bcf	LATB, 1
+		    
 		    movf    rdPressedCoordinate, 0
+		    incf    WREG
+		    
+		    dcfsnz  WREG		    ; Is it ROW0
+			bra col1_row0_released	    
 		    dcfsnz  WREG		    ; Is it ROW1
 			bra col1_row1_released  
 		    dcfsnz  WREG		    ; Is it ROW2
 			bra col1_row2_released
 		    dcfsnz  WREG		    ; Is it ROW3
 			bra col1_row3_released
-		    bra col1_row0_released	    ; Then, must be ROW0
-		    
+			
+		    goto    goBack_definetlyPressed_keypad
+
+			
 		    col1_row0_released:
+			movf	PORTD, 0
 			btfss	    PORTD, 3
 			    goto    goBack_definetlyPressed_keypad
 			    
@@ -1384,17 +1487,24 @@ writeState:
 			; shouldn't be here
 		check_col0_released:
 		    bcf	LATB, 0
+		    
 		    movf    rdPressedCoordinate, 0
+		    incf    WREG
+		    
+		    dcfsnz  WREG		    ; Is it ROW0
+			bra col0_row0_released
 		    dcfsnz  WREG		    ; Is it ROW1
 			bra col0_row1_released    
 		    dcfsnz  WREG		    ; Is it ROW2
 			bra col0_row2_released
 		    dcfsnz  WREG		    ; Is it ROW3
 			bra col0_row3_released
-		    bra col0_row0_released	    ; Then, must be ROW0
+		    
+		    goto    goBack_definetlyPressed_keypad
 		    
 		    col0_row0_released:
 			; shouldn't be here
+			goto    goBack_definetlyPressed_keypad
 		    col0_row1_released:
 			btfss	    PORTD, 2
 			    goto    goBack_definetlyPressed_keypad
@@ -1473,6 +1583,7 @@ writeState:
 				goto keypad_mightBeReleased_common
 		    col0_row3_released:
 			; shouldn't be here
+			goto    goBack_definetlyPressed_keypad
 		goBack_definetlyPressed_keypad:
 		    bcf	isAnyKeyPressed, 3
 		    bsf	isAnyKeyPressed, 2
@@ -1707,6 +1818,7 @@ reviewState:
 	    movlw   HIGH load_letter_for_display_into_w
 	    movwf   PCLATH
 	    movf    reviewStateLeftMostLetter, 0
+	    addlw   0x2
 	    rlncf   WREG, f
 	    rlncf   WREG, f
 	    call    load_last_letter_into_w
@@ -1888,6 +2000,7 @@ readState:
 	    movlw   HIGH load_letter_for_display_into_w
 	    movwf   PCLATH
 	    movf    readStateLeftMostLetter, 0
+	    addlw   0x2
 	    rlncf   WREG, f
 	    rlncf   WREG, f
 	    call    load_last_letter_into_w
