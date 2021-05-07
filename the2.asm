@@ -137,6 +137,11 @@ tempLATA    res 1
     
     
 pollCounter res 1   ;
+ 
+reviewStateLeftMostLetter   res 1   ; 0x1, 0x2, 0x3, ..., 0x6
+   
+readStateDirection	res 1
+readStateLeftMostLetter	res 1
 			    
 org     0x00
 goto	initialState
@@ -153,7 +158,7 @@ isr:
 	bra isr_timer0
     btfsc   PIR1, 1	    ; Is it because of Timer2 (updating screen), check TMR1IF
 	bra isr_timer2
-    btfsc   PIR2, 1
+    btfsc   PIR2, 1	    ; Is it because of Timer3 (Commit and Scroll counter)
 	bra isr_timer3
 	
 isr_timer3:
@@ -197,7 +202,15 @@ isr_timer0:
 	retfie	FAST		    ; Yes, then return from interrupt (We have time)
     
     ; Time Left = 0x00 -> Time is up
-    bcf	    INTCON, 7	    ; No more interrupts, (GIE cleared)
+    ;bcf	    INTCON, 7	    ; No more interrupts, (GIE cleared)
+    
+    bcf	    INTCON, 3	; Disable RB interrupt
+    bcf	    INTCON, 5	; Disable TMR0 interrupt
+    bcf	    PIE1, 0	; Disable TMR1 Interrupt
+    
+
+    
+    
     clrf    outerState	
     bsf	    outerState, 3   ; Go into readState
     
@@ -256,12 +269,20 @@ wait_for_n_times_10ms:  ;n * 10ms (9.98 ms in fact)
     
     
 main:
+    btfsc   attentionRequired, 0    ; Did rb4 changed state ?
+	call rb4_action_detected    ; Yes, 
+    btfsc   attentionRequired, 3    ; Did timer is up for debouincing
+	call whose_timer_is_up	    ; Yes, let's see if it is RB4 or KEYPAD
+    dcfsnz  pollCounter
+	call poll_keypad
+	
+	
     btfsc   outerState, 1   ; Is in writeState ?
-	bra writeState	    ; Yes, go to writeState
+	goto writeState	    ; Yes, go to writeState
     btfsc   outerState, 2   ; Is in reviewState ?
-	bra reviewState	    ; Yes, go to reviewState
+	goto reviewState	    ; Yes, go to reviewState
     btfsc   outerState, 3   ; Is in readState ?
-	bra readState	    ; Yes, go to readState
+	goto readState	    ; Yes, go to readState
     
 initialState:
     
@@ -434,13 +455,8 @@ initialState:
         
 writeState:
     btfsc   shouldUpdateScreen, 0   ; Is 5ms up ?
-	call update_screen_in_writeState	    ; Yes, then draw next 7-seg
-    btfsc   attentionRequired, 0    ; Did rb4 changed state ?
-	call rb4_action_detected    ; Yes, 
-    btfsc   attentionRequired, 3    ; Did timer is up for debouincing
-	call whose_timer_is_up	    ; Yes, let's see if it is RB4 of KEYPAD
-    dcfsnz  pollCounter
-	call poll_keypad
+	call update_screen_in_writeState	    ; Yes, then draw next 7-seg       
+    
     btfsc   commitCurrentLetter, 0  ; Should current letter be committed ?
 	call commit_current_letter  ; Yes, commit
     goto main
@@ -489,6 +505,17 @@ writeState:
 	commit_letter_6:
 	    movwf   letter_6
 	    movlw   0x6
+	    
+	    ;bcf	    INTCON, 7	    ; No more interrupts, (GIE cleared)
+	    
+	    bcf	    INTCON, 3	; Disable RB interrupt
+	    bcf	    INTCON, 5	; Disable TMR0 interrupt
+	    bcf	    PIE1, 0	; Disable TMR1 Interrupt
+    
+    
+	    clrf    outerState	
+	    bsf	    outerState, 3   ; Go into readState
+	    
 	    bra	    common  
 	common:
 	    movwf   lastWrittenLetterPosition
@@ -557,10 +584,97 @@ writeState:
 	btfsc	attentionRequired, 1	; RB4 debouncing timer is up
 	    call rb4_timer_detected
 	btfsc	attentionRequired, 2	; KEYPAD debouincing timer is up
-	    call keypad_timer_detected
+	    call is_it_in_write_or_review
 	return
 	
-	goto	poll_keypad	; Then it must be time to poll KEYPAD
+	is_it_in_write_or_review:
+	    btfsc   outerState, 1   ; Is it in writeState ?
+		call keypad_timer_in_writeState
+	    btfsc   outerState, 2   ; Is it in reviewState ?
+		call keypad_timer_in_reviewState	
+	    return
+	
+	keypad_timer_in_reviewState:
+	    call save_current_display
+	    
+	    bcf	attentionRequired, 2	; Attention is given, clear flag	    
+
+	    btfsc   isAnyKeyPressed, 1	    ; Is in mightBePressed
+		bra keypad_mightBePressed_in_reviewState	    ; Yes, 
+	    btfsc   isAnyKeyPressed, 3	    ; Is in mightBeReleased
+		bra mightBeReleased_in_reviewState	    ; Yes,
+
+	    keypad_mightBePressed_in_reviewState:
+		bsf	LATB, 0
+		bsf	LATB, 1
+		bsf	LATB, 2	
+		
+		btfsc	rbPressedCoordinate, 1	    ; is it RIGHT (COL2)
+		    bra check_right_pressed		
+		bra	check_left_pressed    	    ; Then, must be LEFT (COL0)
+		
+		
+		check_right_pressed:
+		    bcf	LATB, 2
+		    btfsc	    PORTD, 0
+			goto    back_definetlyReleased_review
+
+		    bcf	isAnyKeyPressed, 1
+		    bsf	isAnyKeyPressed, 2
+		    goto restore_current_display		    
+		
+		check_left_pressed:
+		    bcf	LATB, 0
+		    
+		    btfsc	    PORTD, 0
+			goto    back_definetlyReleased_review
+
+		    bcf	isAnyKeyPressed, 1
+		    bsf	isAnyKeyPressed, 2
+		    goto restore_current_display
+		back_definetlyReleased_review:
+			bcf	isAnyKeyPressed, 1
+			bsf	isAnyKeyPressed, 0
+			goto restore_current_display		
+	    mightBeReleased_in_reviewState:
+		bsf	LATB, 0
+		bsf	LATB, 1
+		bsf	LATB, 2
+		
+		btfsc	rbPressedCoordinate, 1	    ; is it RIGHT (COL2)
+		    bra check_right_released		
+		bra	check_left_released    	    ; Then, must be LEFT (COL0)
+		
+		check_right_released:
+		    bcf	LATB, 2
+			btfss	    PORTD, 0
+			    goto    back_definetlyPressed_review
+			
+			movlw	0x3
+			cpfseq	reviewStateLeftMostLetter
+			    incf    reviewStateLeftMostLetter
+			    
+			goto mightBeReleased_com_reviewState					
+		check_left_released:
+		    bcf	LATB, 0
+			btfss	    PORTD, 0
+			    goto    back_definetlyPressed_review
+			
+			movlw	0x1
+			cpfseq	reviewStateLeftMostLetter
+			    decf    reviewStateLeftMostLetter
+			    
+			goto mightBeReleased_com_reviewState	
+		back_definetlyPressed_review:
+		    bcf	isAnyKeyPressed, 3
+		    bsf	isAnyKeyPressed, 2
+		    goto restore_current_display
+		mightBeReleased_com_reviewState:
+		    bcf	isAnyKeyPressed, 3
+		    bsf	isAnyKeyPressed, 0
+		    
+		    goto restore_current_display
+			
 	
 	poll_keypad:
 	    movlw   0x4
@@ -574,22 +688,33 @@ writeState:
 	    poll_all_keys:    
 		call save_current_display
 		
+		btfss   outerState, 1			; Is in reviewState
+			bra poll_col0_in_reviewState	; Yes, 		
+			
 		;********* POLL COL0 *******
-		poll_col0:
+		poll_col0_in_writeState:		; No,
 		    bcf	LATB, 0
-		    btfss	PORTD, 0
-		    	bra coor_0_3
+		    
 		    btfss	PORTD, 1
 			bra coor_0_2
 		    btfss	PORTD, 2
 			bra coor_0_1
-		    btfss	PORTD, 3
-		    	bra coor_0_0
+		    ;btfss	PORTD, 3
+		    ;	bra coor_0_0
+
+		    bsf	LATB, 0
+		    bra poll_col1_in_writeState
+		poll_col0_in_reviewState:
+		    bcf	    LATB, 0
+		    
+		    btfss   PORTD, 0
+		    	bra coor_0_3
 		    
 		    bsf	LATB, 0
-		    bra poll_col1
+		    bra poll_col2_in_reviewState
 
 		    coor_0_0:
+			; shouldn't be here
 			movlw   0x0
 			movwf   rbPressedCoordinate
 			movwf   rdPressedCoordinate
@@ -607,6 +732,7 @@ writeState:
 			movwf   rdPressedCoordinate
 			bra poll_all_keys_common	    
 		    coor_0_3:
+			; shouldn't be here
 			movlw   0x0
 			movwf   rbPressedCoordinate
 			movlw   0x3
@@ -614,10 +740,10 @@ writeState:
 			bra poll_all_keys_common       
 		;***************************
 		;********* POLL COL1 *******
-		poll_col1:
+		poll_col1_in_writeState:
 		    bcf	LATB, 1
-		    btfss	PORTD, 0
-		    	bra coor_1_3
+		    ;btfss	PORTD, 0
+		    ;	bra coor_1_3
 		    btfss	PORTD, 1
 			bra coor_1_2
 		    btfss	PORTD, 2
@@ -626,7 +752,7 @@ writeState:
 		    	bra coor_1_0
 		    
 		    bsf	LATB, 1
-		    bra poll_col2
+		    bra poll_col2_in_writeState
 
 		    coor_1_0:
 			movlw   0x1
@@ -647,6 +773,7 @@ writeState:
 			movwf   rdPressedCoordinate
 			bra poll_all_keys_common	    
 		    coor_1_3:
+			; shouldn't be here
 			movlw   0x1
 			movwf   rbPressedCoordinate
 			movlw   0x3
@@ -654,16 +781,22 @@ writeState:
 			bra poll_all_keys_common       
 		;***************************
 		;********* POLL COL2 *******
-		poll_col2:
-		    bcf	LATB, 2
-		    btfss	PORTD, 0
-			bra coor_2_3		    
+		poll_col2_in_writeState:
+		    bcf	LATB, 2		    
 		    btfss	PORTD, 1
 			bra coor_2_2
 		    btfss	PORTD, 2
 			bra coor_2_1
 		    btfss	PORTD, 3
 			bra coor_2_0
+		    
+		    bsf	LATB, 2
+		    goto restore_current_display
+		    
+		poll_col2_in_reviewState:
+		    bcf	LATB, 2
+		    btfss	PORTD, 0
+		    	bra coor_2_3
 		    
 		    bsf	LATB, 2
 		    goto restore_current_display
@@ -687,6 +820,7 @@ writeState:
 			movwf   rdPressedCoordinate
 			bra poll_all_keys_common	    
 		    coor_2_3:
+			; shouldn't be here
 			movlw   0x2
 			movwf   rbPressedCoordinate
 			movlw   0x3
@@ -715,13 +849,23 @@ writeState:
 		bsf	LATB, 0
 		bsf	LATB, 1
 		bsf	LATB, 2
-
+		
+		btfss	outerState, 2			    ; Is it in reviewState
+		    bra poll_specific_key_in_reviewState    ; Yes, 
+		    
+						    ; No,
 		btfsc	rbPressedCoordinate, 1	    ; is it on COL2
 		    bra check_col2_pressed_def
 		btfsc	rbPressedCoordinate, 0	    ; is it on COL1
 		    bra check_col1_pressed_def
 		bra	check_col0_pressed_def    	    ; then, must be on COL0 
-
+		
+		poll_specific_key_in_reviewState:
+		    btfsc   rbPressedCoordinate, 1	; Is it RIGHT button
+			bra col2_row3_pressed_def	; Yes
+		    bra col0_row3_pressed_def		; No
+		    
+		    
 		check_col2_pressed_def:
 		    bcf	LATB, 2
 		    movf    rdPressedCoordinate, 0
@@ -729,8 +873,9 @@ writeState:
 			bra col2_row1_pressed_def    
 		    dcfsnz  WREG		    ; Is it ROW2
 			bra col2_row2_pressed_def
-		    dcfsnz  WREG		    ; Is it ROW3
-			bra col2_row3_pressed_def
+		    decf    WREG
+		    ;dcfsnz  WREG		    ; Is it ROW3
+			;bra col2_row3_pressed_def
 		    bra col2_row0_pressed_def	    ; Then, must be ROW0
 
 		    col2_row0_pressed_def:
@@ -748,8 +893,9 @@ writeState:
 			btfss	    PORTD, 1
 			    goto restore_current_display
 			goto poll_specific_key_common
-		    col2_row3_pressed_def:
-			btfss	    PORTD, 0
+		    col2_row3_pressed_def:		
+							    ; Yes, It is RIGHT button
+			btfss	    PORTD, 0		    
 			    goto restore_current_display
 			goto poll_specific_key_common		    
 		check_col1_pressed_def:
@@ -759,8 +905,9 @@ writeState:
 			bra col1_row1_pressed_def    
 		    dcfsnz  WREG		    ; Is it ROW2
 			bra col1_row2_pressed_def
-		    dcfsnz  WREG		    ; Is it ROW3
-			bra col1_row3_pressed_def
+		    decf    WREG
+		    ;dcfsnz  WREG		    ; Is it ROW3
+		    ;	bra col1_row3_pressed_def
 		    bra col1_row0_pressed_def	    ; Then, must be ROW0
 
 		    col1_row0_pressed_def:
@@ -776,6 +923,7 @@ writeState:
 			    goto restore_current_display
 			goto poll_specific_key_common
 		    col1_row3_pressed_def:
+			; shouldn't be here
 			btfss	    PORTD, 0
 			    goto restore_current_display
 			goto poll_specific_key_common
@@ -791,6 +939,7 @@ writeState:
 		    bra col0_row0_pressed_def   ; Then, must be ROW0
 
 		    col0_row0_pressed_def:
+			; shouldn't be here
 			btfss	    PORTD, 3
 			    goto restore_current_display
 			goto poll_specific_key_common
@@ -803,6 +952,7 @@ writeState:
 			    goto restore_current_display
 			goto poll_specific_key_common
 		    col0_row3_pressed_def:
+							    ; Yes, It is LEFT button
 			btfss	    PORTD, 0
 			    goto restore_current_display
 			goto poll_specific_key_common
@@ -811,8 +961,7 @@ writeState:
 		    bsf	isAnyKeyPressed, 3	; mightBeReleased	   
 
 		    bsf		attentionRequired, 2	; Timer is set for KEYPAD
-		    bra poll_specific_key_set_timer1_again
-		poll_specific_key_set_timer1_again:
+		    
 		    movlw	0x3C
 		    movwf	TMR1H
 		    movlw	0xB0
@@ -821,7 +970,7 @@ writeState:
 		    bsf	PIE1, 0			; TMR1IE is set
 
 		    goto restore_current_display
-	keypad_timer_detected:
+	keypad_timer_in_writeState:
 	    call save_current_display
 	    
 	    bcf	attentionRequired, 2	; Attention is given, clear flag	    
@@ -875,6 +1024,7 @@ writeState:
 			bsf	isAnyKeyPressed, 2
 			goto restore_current_display
 		    col2_row3_pressed:
+			; shouldn't be here
 			btfsc	    PORTD, 0
 			    goto    goBack_definetlyReleased_keypad
 			
@@ -914,6 +1064,7 @@ writeState:
 			bsf	isAnyKeyPressed, 2
 			goto restore_current_display
 		    col1_row3_pressed:
+			; shouldn't be here
 			btfsc	    PORTD, 0
 			    goto    goBack_definetlyReleased_keypad
 			
@@ -932,6 +1083,7 @@ writeState:
 		    bra col0_row0_pressed	    ; Then, must be ROW0
 		    
 		    col0_row0_pressed:
+			; shouldn't be here
 			btfsc	    PORTD, 3
 			    goto    goBack_definetlyReleased_keypad
 			
@@ -953,6 +1105,7 @@ writeState:
 			bsf	isAnyKeyPressed, 2
 			goto restore_current_display
 		    col0_row3_pressed:
+			; shouldn't be here
 			btfsc	    PORTD, 0
 			    goto    goBack_definetlyReleased_keypad
 			
@@ -1101,9 +1254,7 @@ writeState:
 				
 				goto keypad_mightBeReleased_common
 		    col2_row3_released:
-			btfss	    PORTD, 0
-			    goto    goBack_definetlyPressed_keypad
-			goto keypad_mightBeReleased_common	
+			; shouldn't be here	
 		check_col1_released:
 		    bcf	LATB, 1
 		    movf    rdPressedCoordinate, 0
@@ -1391,8 +1542,16 @@ writeState:
 		to_reviewState:
 		    bcf	outerState, 1
 		    bsf outerState, 2
+		    
+		    clrf    reviewStateLeftMostLetter	; Default is 0x1
+		    bsf	    reviewStateLeftMostLetter, 0
+		    
+		    clrf    currentPushedButton	    ; Current letter is discarded
+		    clrf    currentModulo
+		    
+		    bcf	PIE2, 1		; TMR3 interrupt disabled
+		    bcf	T3CON, 0	; TMR3 is stopped		    
 		    return
-
 
 		goBack_definetlyPressed:
 		    bcf rb4ButtonState, 2
@@ -1484,9 +1643,283 @@ writeState:
 
 	    return
 reviewState:
+    btfsc   shouldUpdateScreen, 0	    ; Is 5ms up ?
+	call update_screen_in_reviewState	    ; Yes, then draw next 7-seg    
     goto main
+    
+    update_screen_in_reviewState:
+	bcf shouldUpdateScreen, 0
+	btfsc   whichScreen, 0  ; Is it Screen1 which must be drawn
+	    bra draw_screen_1_in_reviewState   ; Yes, then draw Screen1
+	btfsc   whichScreen, 1  ; Is it Screen2 which must be drawn
+	    bra draw_screen_2_in_reviewState   ; Yes, then draw Screen2
+	btfsc   whichScreen, 2  ; Is it Screen3 which must be drawn
+	    bra draw_screen_3_in_reviewState   ; Yes, then draw Screen3
+	btfsc   whichScreen, 3  ; Is it Screen4 which must be drawn
+	    bra draw_screen_4_in_reviewState   ; Yes, then draw Screen4
+	    
+	
+	draw_screen_1_in_reviewState:
+	    clrf    LATA	    
+	    
+	    
+	    movlw   HIGH load_letter_for_display_into_w
+	    movwf   PCLATH
+	    movf    reviewStateLeftMostLetter, 0
+	    rlncf   WREG, f
+	    rlncf   WREG, f
+	    call    load_last_letter_into_w
+	    rlncf   WREG, f
+	    call    load_letter_for_display_into_w
+	    movwf   LATD
+	    bsf	    LATA, 2	    ; Select first screen
+
+	    clrf	whichScreen
+	    bsf	whichScreen, 1	; Next, Screen2 will be drawn
+
+	    return
+	    
+	draw_screen_2_in_reviewState:
+	    clrf    LATA	    
+	    
+	    
+	    movlw   HIGH load_letter_for_display_into_w
+	    movwf   PCLATH
+	    movf    reviewStateLeftMostLetter, 0
+	    addlw   0x1
+	    rlncf   WREG, f
+	    rlncf   WREG, f
+	    call    load_last_letter_into_w
+	    rlncf   WREG, f
+	    call    load_letter_for_display_into_w
+	    movwf   LATD
+	    bsf	    LATA, 3	    ; Select second screen
+
+	    clrf	whichScreen
+	    bsf	whichScreen, 2	; Next, Screen3 will be drawn
+
+	    return    
+	   	   
+	draw_screen_3_in_reviewState:
+	    clrf    LATA	    
+	    
+	    
+	    movlw   HIGH load_letter_for_display_into_w
+	    movwf   PCLATH
+	    movf    reviewStateLeftMostLetter, 0
+	    rlncf   WREG, f
+	    rlncf   WREG, f
+	    call    load_last_letter_into_w
+	    rlncf   WREG, f
+	    call    load_letter_for_display_into_w
+	    movwf   LATD
+	    bsf	    LATA, 4	    ; Select third screen
+
+	    clrf	whichScreen
+	    bsf	whichScreen, 3	; Next, Screen4 will be drawn
+
+	    return
+	draw_screen_4_in_reviewState:
+	    clrf    LATA	    
+	    
+	    
+	    movlw   HIGH load_letter_for_display_into_w
+	    movwf   PCLATH
+	    movf    reviewStateLeftMostLetter, 0
+	    addlw   0x3
+	    rlncf   WREG, f
+	    rlncf   WREG, f
+	    call    load_last_letter_into_w
+	    rlncf   WREG, f
+	    call    load_letter_for_display_into_w
+	    movwf   LATD
+	    bsf	    LATA, 5	    ; Select fourth screen
+
+	    clrf	whichScreen
+	    bsf	whichScreen, 0	; Next, Screen0 will be drawn
+
+	    return
+	    
+    
+    
 readState:
-    goto main
+    init:
+	clrf	readStateDirection  ; Default direction is to right
+	
+	movlw	0x1
+	movwf	readStateLeftMostLetter	; Default left most is letter_1
+	
+	;****** TIMER3 SETUP for scrolling (1s) (Actually used for commit but the same logic) **********
+	bsf	T3CON, 4	; 1:2 Prescale is set
+
+	movlw	0x4D
+	movwf	commitCounter
+
+	movlw	0x3C
+	movwf	TMR3H
+	movlw	0xB0
+	movwf	TMR3L		; Initial value for 10ms
+	
+	movf	PIR2		; Must have last-read value
+	bcf	PIR2, 1		; so that TMR3IF can be cleared
+
+	bsf	PIE2, 1		; TMR3 interrupt enabled
+	bsf	T3CON, 0	; TMR3 is started
+	;*****************************	
+	
+    
+    infinite:
+    btfsc   shouldUpdateScreen, 0	    ; Is 5ms up ?
+	call update_screen_in_readState	    ; Yes, then draw next 7-seg    
+    btfsc   commitCurrentLetter, 0	    ; Should letters be scrolled ?
+	call scroll_letters	    ; Yes, scroll
+    goto infinite
+    
+    scroll_letters:
+	clrf	commitCurrentLetter
+	
+	;****** TIMER3 SETUP for scrolling (1s) (Actually used for commit but the same logic) **********
+	bsf	T3CON, 4	; 1:2 Prescale is set
+
+	movlw	0x4D
+	movwf	commitCounter
+
+	movlw	0x3C
+	movwf	TMR3H
+	movlw	0xB0
+	movwf	TMR3L		; Initial value for 10ms
+	
+	movf	PIR2		; Must have last-read value
+	bcf	PIR2, 1		; so that TMR3IF can be cleared
+
+	bsf	PIE2, 1		; TMR3 interrupt enabled
+	bsf	T3CON, 0	; TMR3 is started
+	;*****************************
+	
+	btfss	readStateDirection, 0	; Should they be scrolled to the right ?
+	    bra scroll_right		; Yes, 
+	bra scroll_left		; No, 
+	
+	scroll_right:
+	    movlw   0x3
+	    cpfseq  readStateLeftMostLetter
+		bra scroll_right_by_1
+	    bra	change_dir_to_left
+	    
+	    scroll_right_by_1:
+		incf	readStateLeftMostLetter
+		return
+	    change_dir_to_left:
+		bsf	readStateDirection, 0
+		decf	readStateLeftMostLetter
+		return
+		
+	scroll_left:
+	    movlw   0x1
+	    cpfseq  readStateLeftMostLetter
+		bra scroll_left_by_1
+	    bra	change_dir_to_right
+	    
+	    scroll_left_by_1:
+		decf	readStateLeftMostLetter
+		return
+	    change_dir_to_right:
+		bcf	readStateDirection, 0
+		incf	readStateLeftMostLetter
+		return
+    
+    update_screen_in_readState:
+	bcf shouldUpdateScreen, 0
+	btfsc   whichScreen, 0  ; Is it Screen1 which must be drawn
+	    bra draw_screen_1_in_readState	; Yes, then draw Screen1
+	btfsc   whichScreen, 1  ; Is it Screen2 which must be drawn
+	    bra draw_screen_2_in_readState	; Yes, then draw Screen2
+	btfsc   whichScreen, 2  ; Is it Screen3 which must be drawn
+	    bra draw_screen_3_in_readState	; Yes, then draw Screen3
+	btfsc   whichScreen, 3  ; Is it Screen4 which must be drawn
+	    bra draw_screen_4_in_readState	; Yes, then draw Screen4
+	    
+	
+	draw_screen_1_in_readState:
+	    clrf    LATA	    
+	    
+	    
+	    movlw   HIGH load_letter_for_display_into_w
+	    movwf   PCLATH
+	    movf    readStateLeftMostLetter, 0
+	    rlncf   WREG, f
+	    rlncf   WREG, f
+	    call    load_last_letter_into_w
+	    rlncf   WREG, f
+	    call    load_letter_for_display_into_w
+	    movwf   LATD
+	    bsf	    LATA, 2	    ; Select first screen
+
+	    clrf	whichScreen
+	    bsf	whichScreen, 1	; Next, Screen2 will be drawn
+
+	    return
+	    
+	draw_screen_2_in_readState:
+	    clrf    LATA	    
+	    
+	    
+	    movlw   HIGH load_letter_for_display_into_w
+	    movwf   PCLATH
+	    movf    readStateLeftMostLetter, 0
+	    addlw   0x1
+	    rlncf   WREG, f
+	    rlncf   WREG, f
+	    call    load_last_letter_into_w
+	    rlncf   WREG, f
+	    call    load_letter_for_display_into_w
+	    movwf   LATD
+	    bsf	    LATA, 3	    ; Select second screen
+
+	    clrf	whichScreen
+	    bsf	whichScreen, 2	; Next, Screen3 will be drawn
+
+	    return    
+	   	   
+	draw_screen_3_in_readState:
+	    clrf    LATA	    
+	    
+	    
+	    movlw   HIGH load_letter_for_display_into_w
+	    movwf   PCLATH
+	    movf    readStateLeftMostLetter, 0
+	    rlncf   WREG, f
+	    rlncf   WREG, f
+	    call    load_last_letter_into_w
+	    rlncf   WREG, f
+	    call    load_letter_for_display_into_w
+	    movwf   LATD
+	    bsf	    LATA, 4	    ; Select third screen
+
+	    clrf	whichScreen
+	    bsf	whichScreen, 3	; Next, Screen4 will be drawn
+
+	    return
+	draw_screen_4_in_readState:
+	    clrf    LATA	    
+	    
+	    
+	    movlw   HIGH load_letter_for_display_into_w
+	    movwf   PCLATH
+	    movf    readStateLeftMostLetter, 0
+	    addlw   0x3
+	    rlncf   WREG, f
+	    rlncf   WREG, f
+	    call    load_last_letter_into_w
+	    rlncf   WREG, f
+	    call    load_letter_for_display_into_w
+	    movwf   LATD
+	    bsf	    LATA, 5	    ; Select fourth screen
+
+	    clrf	whichScreen
+	    bsf	whichScreen, 0	; Next, Screen0 will be drawn
+
+	    return
     
 org	0x1000
 load_letter_for_display_into_w:
@@ -1571,7 +2004,7 @@ load_digit_for_display_into_w:
 	retlw   b'01100111'
 load_last_letter_into_w:
     addwf   PCL, f   
-    load_letter_0_ie_no_character_yet:
+    no_character_yet:
 	movlw	b'00000000'
 	return
     load_letter_1:
