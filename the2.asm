@@ -378,20 +378,48 @@ poll_given_key:
     
     poll_row0:
 	btfss	PORTD, 3
-	    setf    ret
+	    bra poll_row0_after
 	bra poll_result
+	poll_row0_after:
+	    movlw   0x1
+	    movwf   count_n
+	    call    wait_for_n_times_10ms
+	    btfss	PORTD, 3
+		setf	ret
+	    bra poll_result  
     poll_row1:
 	btfss	PORTD, 2
-	    setf    ret
+	    bra poll_row1_after
 	bra poll_result
+	poll_row1_after:
+	    movlw   0x1
+	    movwf   count_n
+	    call    wait_for_n_times_10ms
+	    btfss	PORTD, 2
+		setf	ret
+	    bra poll_result
     poll_row2:
 	btfss	PORTD, 1
-	    setf    ret
+	    bra poll_row2_after
 	bra poll_result
+	poll_row2_after:
+	    movlw   0x1
+	    movwf   count_n
+	    call    wait_for_n_times_10ms
+	    btfss	PORTD, 1
+		setf	ret
+	    bra poll_result
     poll_row3:
 	btfss	PORTD, 0
-	    setf    ret
-	bra poll_result		    
+	    bra poll_row3_after
+	bra poll_result
+	poll_row3_after:
+	    movlw   0x1
+	    movwf   count_n
+	    call    wait_for_n_times_10ms
+	    btfss	PORTD, 0
+		setf	ret
+	    bra poll_result
     poll_result:
 	call restore_current_display
 	btfss	press_arg, 0
@@ -441,7 +469,7 @@ initialState:
     ;************************   
     
     ;***** Start Main Loop ******
-    bra from_initial_to_write;main
+    ;bra from_initial_to_write;main
     ;************************
     rb3_Released:
 	btfsc	PORTB, 3	    ; Is Pressed ? (LOW ?)
@@ -520,16 +548,16 @@ initialState:
 	;******************
 
 	;***** TIMER2 Setup (for Screen Updating, at every --ms one of 7-seg will be set) ******
-	;movlw   b'011110101'		; 1:16 Prescale and 1:16 Postscale
-	;movwf   T2CON
+	movlw   b'011110101'		; 1:16 Prescale and 1:16 Postscale
+	movwf   T2CON
 	
-	;movlw	    0xC3
-	;movwf	    PR2
+	movlw	    0xC3
+	movwf	    PR2
 
-	;bsf	    T2CON, 2	; TMR2 is started
-	;bsf	    PIE1, 1	; TMR2 interrupt enabled
-	;movf	    PIR1	; Must have last-read value
-	;bcf	    PIR1, 1	; so that TMR2IF can be cleared
+	bsf	    T2CON, 2	; TMR2 is started
+	bsf	    PIE1, 1	; TMR2 interrupt enabled
+	movf	    PIR1	; Must have last-read value
+	bcf	    PIR1, 1	; so that TMR2IF can be cleared
 	;******************************************	
 	
 	;****** TIMER3 SETUP for letter commit time (1s) **********
@@ -604,7 +632,8 @@ initialState:
 	
         
 writeState:
-    call update_screen_in_writeState	    ; Yes, then draw next 7-seg       
+    btfsc   shouldUpdateScreen, 0	    ; Is 5ms up ?
+        call update_screen_in_writeState	    ; Yes, then draw next 7-seg       
     
     btfsc   commitCurrentLetter, 0  ; Should current letter be committed ?
 	call commit_current_letter  ; Yes, commit
@@ -767,20 +796,20 @@ writeState:
 	    btfsc   keypadState, 1
 		bra keypad_mightBePressed
 	    btfsc   keypadState, 2
-		bra keypad_definetlyPressed
+		bra keypad_mightBeReleased;keypad_definetlyPressed
 	    btfsc   keypadState, 3
 		bra keypad_mightBeReleased
 	    
 	    nop	; Shouldn't be here
 	    
 	    keypad_mightBeReleased:
-		btfss	attentionRequired, 3	; Is time is up yet ?
-		    return			; No, 
-		btfss	isKeypadWaiting, 0		; Is this for keypad ?
-		    return			; No,
+		;btfss	attentionRequired, 3	; Is time is up yet ?
+		 ;   return			; No, 
+		;btfss	isKeypadWaiting, 0		; Is this for keypad ?
+		 ;   return			; No,
 		
-		clrf	isKeypadWaiting		; Clear related flags
-		clrf	attentionRequired
+		;clrf	isKeypadWaiting		; Clear related flags
+		;clrf	attentionRequired
 		
 		btfsc	outerState, 1
 		    bra keypad_mightBeReleased_writeState
@@ -803,6 +832,7 @@ writeState:
 			
 		    keypad_mightBeReleased_rev_found:
 			clrf    keypadState		    ; Change the state into definetlyReleased
+			bsf	keypadState, 0
 			
 			test_left:
 			    movlw   0x0
@@ -856,7 +886,8 @@ writeState:
 			bsf	T3CON, 0	; TMR3 is started
 			;*****************************
 			
-			clrf	keypadState	    ; Change the state into definetlyReleased				
+			clrf	keypadState	    ; Change the state into definetlyReleased	
+			bsf	keypadState, 0
 			return
 		perform_required_action:
 		    movf	row_arg, 0
@@ -901,10 +932,10 @@ writeState:
 		
 		keypad_definetlyPressed_found:
 		    clrf    keypadState
-		    bsf	keypadState, 3		; Change the state into mightBeReleased
+		    bsf	keypadState, 0		; Change the state into mightBeReleased
 
-		    call    set_timer1_debouncing	; Debouncing TIMER1 is set
-		    setf    isKeypadWaiting		; For keypad
+		    ;call    set_timer1_debouncing	; Debouncing TIMER1 is set
+		    ;setf    isKeypadWaiting		; For keypad
 		    return
 	    
 	    keypad_mightBePressed:
@@ -947,9 +978,16 @@ writeState:
 		    movlw   0x2
 		    movwf   col_arg	; Start from COL2
 		    loop_col:
-			movlw   0x3
-			movwf   row_arg	; Start from ROW3			
-			loop_row:    
+			movlw   0x2
+			movwf   row_arg	; Start from ROW2			
+			loop_row:
+			    movlw   0x0
+			    cpfseq  col_arg
+				bra done
+			    cpfseq  row_arg
+				bra done
+			    bra loop_row_end
+			    done:
 			    call    poll_given_key
 			    btfsc   ret, 0			; Is return value true ?
 				bra keypad_definetlyReleased_found		; Yes,
@@ -964,6 +1002,8 @@ writeState:
 			    bra loop_col			; As long as col_arg is greater than or equal to 0, continune loop_row
 		    return			; No key activity is found			    
 		keypad_definetlyReleased_reviewState:
+		    setf	press_arg
+		    
 		    movlw	0x3
 		    movwf	row_arg		; We will poll only ROW3 (since RIGHT and LEFT is on ROW3)
 
@@ -986,10 +1026,10 @@ writeState:
 		    movff   row_arg, rowCoordinate	; save row
 
 		    clrf    keypadState
-		    bsf	    keypadState, 1		; Move into mightBePressed state
+		    bsf	    keypadState, 2		; Move into mightBePressed state
 
-		    call    set_timer1_debouncing	; Debouncing TIMER1 is set
-		    setf    isKeypadWaiting		; For keypad
+		    ;call    set_timer1_debouncing	; Debouncing TIMER1 is set
+		    ;setf    isKeypadWaiting		; For keypad
 		    return
 ;***********************************************
 	
@@ -1056,7 +1096,7 @@ writeState:
 		    return
     
     update_screen_in_writeState:
-	;bcf shouldUpdateScreen, 0
+	bcf shouldUpdateScreen, 0
 	btfsc   whichScreen, 0  ; Is it Screen1 which must be drawn
 	    bra draw_screen_1   ; Yes, then draw Screen1
 	btfsc   whichScreen, 1  ; Is it Screen2 which must be drawn
@@ -1140,12 +1180,12 @@ writeState:
 
 	    return
 reviewState:
-    ;btfsc   shouldUpdateScreen, 0	    ; Is 5ms up ?
+    btfsc   shouldUpdateScreen, 0	    ; Is 5ms up ?
 	call update_screen_in_reviewState	    ; Yes, then draw next 7-seg    
     goto main
     
     update_screen_in_reviewState:
-	;bcf shouldUpdateScreen, 0
+	bcf shouldUpdateScreen, 0
 	btfsc   whichScreen, 0  ; Is it Screen1 which must be drawn
 	    bra draw_screen_1_in_reviewState   ; Yes, then draw Screen1
 	btfsc   whichScreen, 1  ; Is it Screen2 which must be drawn
