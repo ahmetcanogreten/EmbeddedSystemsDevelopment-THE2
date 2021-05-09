@@ -116,10 +116,12 @@ shouldUpdateScreen  res 1   ; At every 5ms bit0 will be set to 1 to signal main 
 			    ; That is, next 7-seg must bu drawn. 1, 2, 3, 4, 1, 2, ...
 			    
 
-rbPressedCoordinate res 1   ; will be used to poll the specific button
-rdPressedCoordinate res 1   ; will be used to poll the specific button
-			    
-isAnyKeyPressed	res 1	    ; bit0 -> definetlyReleased, bit1 -> mightBePressed, bit2 -> definetlyPressed, bit3 -> mightBeReleased
+colCoordinate res 1   ; will be used to poll the specific button
+rowCoordinate res 1   ; will be used to poll the specific button
+	
+
+isKeypadWaiting	res 1	    ; Denotes that timer1 10ms is set for keypad debouncing
+keypadState	res 1	    ; bit0 -> definetlyReleased, bit1 -> mightBePressed, bit2 -> definetlyPressed, bit3 -> mightBeReleased
 			    ; in definetlyReleased state, all keys are polled
 			    ; in other states, specific key is polled
 			    
@@ -142,6 +144,11 @@ reviewStateLeftMostLetter   res 1   ; 0x1, 0x2, 0x3, ..., 0x6
    
 readStateDirection	res 1
 readStateLeftMostLetter	res 1
+	
+col_arg	    res 1
+row_arg	    res 1
+press_arg   res 1
+ret	    res 1
 			    
 org     0x00
 goto	initialState
@@ -307,14 +314,102 @@ set_letters:
     bsf	    reviewStateLeftMostLetter, 0
     return
     
-main:
+poll_given_key:		
+    ; Arguments : 
+    ;	    col_arg	reg (x-coor (COL)) (0 for leftmost column)
+    ;	    row_arg	reg (y-coor (ROW)) (0 for upmost column)
+    ;	    press_arg	reg(if bit0 is set, poll for pressed, if not poll for released)
+    ; Return :
+    ;	    ret (the bool value as answer to the question asked)
+    
+    ; We will actually poll always for pressed. However, at the end manipulate
+    ; the result if press_arg is not set.For example, if button is pressed but
+    ; question is "is not pressed?" (press_arg is not set), then we will negate the result.
+    
+    call save_current_display
+
+    ;movff	TRISB, tempTRISB
+    ;movff	LATB, tempLATB
+
+    ;movlw	b'11111000'
+    ;movwf	TRISB
+
+    ;movlw	b'00000111'
+    ;movwf	LATB
+    
+    ;bcf	    TRISB, 0
+    ;bcf	    TRISB, 1
+    ;bcf	    TRISB, 2
+    
+    bsf	    LATB, 0
+    bsf	    LATB, 1
+    bsf	    LATB, 2
+
+    ;****** WHICH COLUMN IS TO BE POLLED ***********		
+    movf	col_arg, 0		    ; Move column coordinate into WREG
+    incf	WREG		    ; increment by 0 so that when tested with dcfsnz, COL0 won't underflow
+
+    dcfsnz	WREG		    ; Is it COL0
+	bcf	LATB, 0
+    dcfsnz	WREG		    ; Is it COL1
+	bcf	LATB, 1
+    dcfsnz	WREG		    ; Is it COL2
+	bcf	LATB, 2
+    ;***********************************************
+
+    clrf	ret	; Clear return value
+
+    ;****** WHICH ROW IS TO BE POLLED ***********		
+    movf	row_arg, 0		    ; Move column coordinate into WREG
+    incf	WREG		    ; increment by 0 so that when tested with dcfsnz, COL0 won't underflow
+
+    dcfsnz	WREG		    ; Is it ROW0
+	bra	poll_row0
+    dcfsnz	WREG		    ; Is it ROW1
+	bra	poll_row1
+    dcfsnz	WREG		    ; Is it ROW2
+	bra	poll_row2
+    dcfsnz	WREG		    ; Is it ROW3
+	bra	poll_row3
+
+    ; Shouldn't be here
+    nop
+    ;***********************************************
+    
+    poll_row0:
+	btfss	PORTD, 3
+	    setf    ret
+	bra poll_result
+    poll_row1:
+	btfss	PORTD, 2
+	    setf    ret
+	bra poll_result
+    poll_row2:
+	btfss	PORTD, 1
+	    setf    ret
+	bra poll_result
+    poll_row3:
+	btfss	PORTD, 0
+	    setf    ret
+	bra poll_result		    
+    poll_result:
+	call restore_current_display
+	btfss	press_arg, 0
+	    comf    ret, 1
+	return FAST   
+
+check_rb4:
     btfsc   attentionRequired, 0    ; Did rb4 changed state ?
 	call rb4_action_detected    ; Yes, 
-    btfsc   attentionRequired, 3    ; Did timer is up for debouincing
-	call whose_timer_is_up	    ; Yes, let's see if it is RB4 or KEYPAD
+    btfsc   attentionRequired, 1    ; Did timer is set for RB4 debouincing ?
+	call rb4_timer_detected	    ; Yes, 
+    return
+    
+main:
     dcfsnz  pollCounter
-	call poll_keypad
-	
+    	call poll_keypad
+    
+    call check_rb4
 	
     btfsc   outerState, 1   ; Is in writeState ?
 	goto writeState	    ; Yes, go to writeState
@@ -325,18 +420,10 @@ main:
     
 set_timer1_debouncing:
     ;***** TIMER1 SETUP (for debouncing of RB4 and KEYPAD, 10ms is set in ISR)******
-	clrf	    T1CON
-	bsf	    T1CON, 4		; 1:2 Prescale set
-	bsf	    INTCON, 6		; Peripheral Interrupts Enabled
-	
-;	movlw	0x3C
-;	movwf	TMR1H
-;	movlw	0xB0
-;	movwf	TMR1L		; 0x3CB0 = 15536 is the initial value of Timer1
-;	bsf	T1CON, 0		; TMR1ON is set
-;	bsf	PIE1, 0			; TMR1IE is set
-	;************************
-	
+    clrf	    T1CON
+    bsf	    T1CON, 4		; 1:2 Prescale set
+    bsf	    INTCON, 6		; Peripheral Interrupts Enabled
+
     movlw	0x3C
     movwf	TMR1H
     movlw	0xB0
@@ -354,7 +441,7 @@ initialState:
     ;************************   
     
     ;***** Start Main Loop ******
-    ;bra from_initial_to_write;main
+    bra from_initial_to_write;main
     ;************************
     rb3_Released:
 	btfsc	PORTB, 3	    ; Is Pressed ? (LOW ?)
@@ -433,16 +520,16 @@ initialState:
 	;******************
 
 	;***** TIMER2 Setup (for Screen Updating, at every --ms one of 7-seg will be set) ******
-	movlw   b'011110101'		; 1:16 Prescale and 1:16 Postscale
-	movwf   T2CON
+	;movlw   b'011110101'		; 1:16 Prescale and 1:16 Postscale
+	;movwf   T2CON
 	
-	movlw	    0xC3
-	movwf	    PR2
+	;movlw	    0xC3
+	;movwf	    PR2
 
-	bsf	    T2CON, 2	; TMR2 is started
-	bsf	    PIE1, 1	; TMR2 interrupt enabled
-	movf	    PIR1	; Must have last-read value
-	bcf	    PIR1, 1	; so that TMR2IF can be cleared
+	;bsf	    T2CON, 2	; TMR2 is started
+	;bsf	    PIE1, 1	; TMR2 interrupt enabled
+	;movf	    PIR1	; Must have last-read value
+	;bcf	    PIR1, 1	; so that TMR2IF can be cleared
 	;******************************************	
 	
 	;****** TIMER3 SETUP for letter commit time (1s) **********
@@ -489,13 +576,14 @@ initialState:
 	;bsf	TRISD, 2	; RD2 set as INPUT
 	;bsf	TRISD, 3	; RD3 set as INPUT
 	
-	clrf	rbPressedCoordinate	; coordinates are not important when not pressed
-	clrf	rdPressedCoordinate	; coordinates are not important when not pressed
+	clrf	colCoordinate	; coordinates are not important when not pressed
+	clrf	rowCoordinate	; coordinates are not important when not pressed
 	
-	clrf	isAnyKeyPressed		; currently no key is pressed
-	bsf	isAnyKeyPressed, 0	; wait in definitelyReleased state
+	clrf	keypadState		; currently no key is pressed
+	bsf	keypadState, 0		; wait in definitelyReleased state
+	clrf	isKeypadWaiting		; Currently timer1 is not set for keypad
 	
-	movlw	0x1
+	movlw	0x01
 	movwf	pollCounter
 	;****************************
 	
@@ -516,8 +604,7 @@ initialState:
 	
         
 writeState:
-    btfsc   shouldUpdateScreen, 0   ; Is 5ms up ?
-	call update_screen_in_writeState	    ; Yes, then draw next 7-seg       
+    call update_screen_in_writeState	    ; Yes, then draw next 7-seg       
     
     btfsc   commitCurrentLetter, 0  ; Should current letter be committed ?
 	call commit_current_letter  ; Yes, commit
@@ -636,87 +723,10 @@ writeState:
 	    
 	    return
 	    
-    whose_timer_is_up:    
-	bcf	attentionRequired, 3	; debouincing flag is cleared
+    
 	
-	btfsc	attentionRequired, 1	; RB4 debouncing timer is up
-	    call rb4_timer_detected
-	btfsc	attentionRequired, 2	; KEYPAD debouincing timer is up
-	    call is_it_in_write_or_review
-	return
 	
-	is_it_in_write_or_review:
-	    btfsc   outerState, 1   ; Is it in writeState ?
-		call keypad_timer_in_writeState
-	    btfsc   outerState, 2   ; Is it in reviewState ?
-		call keypad_timer_in_reviewState	
-	    return
 	
-	keypad_timer_in_reviewState:
-	    call save_current_display
-	    
-	    bcf	attentionRequired, 2	; Attention is given, clear flag	    
-
-	    btfsc   isAnyKeyPressed, 1	    ; Is in mightBePressed
-		bra keypad_mightBePressed_in_reviewState	    ; Yes, 
-	    btfsc   isAnyKeyPressed, 3	    ; Is in mightBeReleased
-		bra mightBeReleased_in_reviewState	    ; Yes,
-
-	    keypad_mightBePressed_in_reviewState:
-		bsf	LATB, 0
-		bsf	LATB, 1
-		bsf	LATB, 2	
-		
-		movf	rbPressedCoordinate, 0
-		incf	WREG
-		
-		dcfsnz	WREG			    ; Is it LEFT (COL0)
-		    bra	check_left_pressed 
-		decf	WREG
-		dcfsnz	WREG			    ; Is it RIGHT (COL2)
-		    bra check_right_pressed
-		    
-		goto    back_definetlyReleased_review
-		
-		
-		
-		check_right_pressed:
-		    bcf	LATB, 2
-		    btfsc	    PORTD, 0
-			goto    back_definetlyReleased_review
-
-		    bcf	isAnyKeyPressed, 1
-		    bsf	isAnyKeyPressed, 2
-		    goto restore_current_display		    
-		
-		check_left_pressed:
-		    bcf	LATB, 0
-		    
-		    btfsc	    PORTD, 0
-			goto    back_definetlyReleased_review
-
-		    bcf	isAnyKeyPressed, 1
-		    bsf	isAnyKeyPressed, 2
-		    goto restore_current_display
-		back_definetlyReleased_review:
-			bcf	isAnyKeyPressed, 1
-			bsf	isAnyKeyPressed, 0
-			goto restore_current_display		
-	    mightBeReleased_in_reviewState:
-		bsf	LATB, 0
-		bsf	LATB, 1
-		bsf	LATB, 2
-		
-		movf	rbPressedCoordinate, 0
-		incf	WREG
-		
-		dcfsnz	WREG			    ; Is it LEFT (COL0)
-		    bra	check_left_released 	
-		decf	WREG
-		dcfsnz	WREG			    ; Is it RIGHT (COL2)
-		    bra check_right_released		
-		
-		goto    back_definetlyPressed_review
 		check_right_released:
 		    bcf	LATB, 2
 		    btfss	    PORTD, 0
@@ -738,883 +748,259 @@ writeState:
 
 		    goto mightBeReleased_com_reviewState	
 		back_definetlyPressed_review:
-		    bcf	isAnyKeyPressed, 3
-		    bsf	isAnyKeyPressed, 2
+		    bcf	keypadState, 3
+		    bsf	keypadState, 2
 		    goto restore_current_display
 		mightBeReleased_com_reviewState:
-		    bcf	isAnyKeyPressed, 3
-		    bsf	isAnyKeyPressed, 0
+		    bcf	keypadState, 3
+		    bsf	keypadState, 0
 		    
 		    goto restore_current_display
 			
 	
 	poll_keypad:
-	    movlw   0x4
+	    movlw   0x68
 	    movwf   pollCounter
 	    
-	    btfsc   isAnyKeyPressed, 0	    ; Is in definetlyReleased
-		call poll_all_keys	    ; Yes, poll all keys
-	    btfsc   isAnyKeyPressed, 2	    ; Is in definetlyPressed
-		call poll_specific_key	    ; Yes, poll the specific key
-	    return
-	    poll_all_keys:    
-		call save_current_display
-		
-		btfss   outerState, 1			; Is in reviewState
-			bra poll_col0_in_reviewState	; Yes, 		
-			
-		;********* POLL COL0 *******
-		poll_col0_in_writeState:		; No,
-		    bcf	LATB, 0
-		    
-		    btfss	PORTD, 1
-			bra coor_0_2
-		    btfss	PORTD, 2
-			bra coor_0_1
-		    ;btfss	PORTD, 3
-		    ;	bra coor_0_0
-
-		    bsf	LATB, 0
-		    bra poll_col1_in_writeState
-		poll_col0_in_reviewState:
-		    bcf	    LATB, 0
-		    
-		    btfss   PORTD, 0
-		    	bra coor_0_3
-		    
-		    bsf	LATB, 0
-		    bra poll_col2_in_reviewState
-
-		    coor_0_0:
-			; shouldn't be here
-			movlw   0x0
-			movwf   rbPressedCoordinate
-			movwf   rdPressedCoordinate
-			bra poll_all_keys_common	    
-		    coor_0_1:
-			movlw   0x0
-			movwf   rbPressedCoordinate
-			movlw   0x1
-			movwf   rdPressedCoordinate
-			bra poll_all_keys_common	    
-		    coor_0_2:
-			movlw   0x0
-			movwf   rbPressedCoordinate
-			movlw   0x2
-			movwf   rdPressedCoordinate
-			bra poll_all_keys_common	    
-		    coor_0_3:
-			; shouldn't be here
-			movlw   0x0
-			movwf   rbPressedCoordinate
-			movlw   0x3
-			movwf   rdPressedCoordinate
-			bra poll_all_keys_common       
-		;***************************
-		;********* POLL COL1 *******
-		poll_col1_in_writeState:
-		    bcf	LATB, 1
-		    ;btfss	PORTD, 0
-		    ;	bra coor_1_3
-		    btfss	PORTD, 1
-			bra coor_1_2
-		    btfss	PORTD, 2
-			bra coor_1_1
-		    btfss	PORTD, 3
-		    	bra coor_1_0
-		    
-		    bsf	LATB, 1
-		    bra poll_col2_in_writeState
-
-		    coor_1_0:
-			movlw   0x1
-			movwf   rbPressedCoordinate
-			movlw   0x0
-			movwf   rdPressedCoordinate
-			bra poll_all_keys_common	    
-		    coor_1_1:
-			movlw   0x1
-			movwf   rbPressedCoordinate
-			movlw   0x1
-			movwf   rdPressedCoordinate
-			bra poll_all_keys_common	    
-		    coor_1_2:
-			movlw   0x1
-			movwf   rbPressedCoordinate
-			movlw   0x2
-			movwf   rdPressedCoordinate
-			bra poll_all_keys_common	    
-		    coor_1_3:
-			; shouldn't be here
-			movlw   0x1
-			movwf   rbPressedCoordinate
-			movlw   0x3
-			movwf   rdPressedCoordinate
-			bra poll_all_keys_common       
-		;***************************
-		;********* POLL COL2 *******
-		poll_col2_in_writeState:
-		    bcf	LATB, 2		    
-		    btfss	PORTD, 1
-			bra coor_2_2
-		    btfss	PORTD, 2
-			bra coor_2_1
-		    btfss	PORTD, 3
-			bra coor_2_0
-		    
-		    bsf	LATB, 2
-		    goto restore_current_display
-		    
-		poll_col2_in_reviewState:
-		    bcf	LATB, 2
-		    btfss	PORTD, 0
-		    	bra coor_2_3
-		    
-		    bsf	LATB, 2
-		    goto restore_current_display
-
-		    coor_2_0:
-			movlw   0x2
-			movwf   rbPressedCoordinate
-			movlw   0x0
-			movwf   rdPressedCoordinate
-			bra poll_all_keys_common	    
-		    coor_2_1:
-			movlw   0x2
-			movwf   rbPressedCoordinate
-			movlw   0x1
-			movwf   rdPressedCoordinate
-			bra poll_all_keys_common	    
-		    coor_2_2:
-			movlw   0x2
-			movwf   rbPressedCoordinate
-			movlw   0x2
-			movwf   rdPressedCoordinate
-			bra poll_all_keys_common	    
-		    coor_2_3:
-			; shouldn't be here
-			movlw   0x2
-			movwf   rbPressedCoordinate
-			movlw   0x3
-			movwf   rdPressedCoordinate
-			bra poll_all_keys_common       
-		;***************************	
-		poll_all_keys_common:    
-		    bcf	    isAnyKeyPressed, 0	; Change state into
-		    bsf	    isAnyKeyPressed, 1	; mightBePressed
-
-		    bsf		attentionRequired, 2	; Timer is set for KEYPAD
-		    bra poll_all_keys_set_timer1_again
-		    
-		poll_all_keys_set_timer1_again:
-    
-		    call set_timer1_debouncing
-		    
-		    goto restore_current_display
-		    
-	    poll_specific_key:
-		call save_current_display
-
-		bsf	LATB, 0
-		bsf	LATB, 1
-		bsf	LATB, 2
-		
-		btfsc	outerState, 2			    ; Is it in reviewState
-		    bra poll_specific_key_in_reviewState    ; Yes, 
-		    
-						    ; No,
-		movf	rbPressedCoordinate, 0
-		incf	WREG
-		
-		dcfsnz	WREG	; Is it on COL0
-		    bra check_col0_pressed_def 
-		dcfsnz	WREG	; Is it on COL1
-		    bra check_col1_pressed_def
-		dcfsnz	WREG	; Is it on COL2
-		    bra check_col2_pressed_def
-		
-		goto restore_current_display
-		
-		poll_specific_key_in_reviewState:
-		    btfsc   rbPressedCoordinate, 1	; Is it RIGHT button
-			bra col2_row3_pressed_def	; Yes
-		    bra col0_row3_pressed_def		; No
-		    
-		    
-		check_col2_pressed_def:
-		    bcf	LATB, 2
-		    
-		    movf    rdPressedCoordinate, 0
-		    incf    WREG
-			
-		    dcfsnz  WREG		    ; Is it ROW0
-			bra col2_row0_pressed_def	     
-		    dcfsnz  WREG		    ; Is it ROW1
-			bra col2_row1_pressed_def    
-		    dcfsnz  WREG		    ; Is it ROW2
-			bra col2_row2_pressed_def
-		    
-		    goto restore_current_display
-
-		    col2_row0_pressed_def:
-			movf	    PORTD, 0
-			btfss	    PORTD, 3
-			;btfss	    PORTD, 3
-			    goto restore_current_display
-			nop
-			goto poll_specific_key_common
-		    col2_row1_pressed_def:
-			btfss	    PORTD, 2
-			    goto restore_current_display
-			goto poll_specific_key_common
-		    col2_row2_pressed_def:
-			btfss	    PORTD, 1
-			    goto restore_current_display
-			goto poll_specific_key_common
-		    col2_row3_pressed_def:		
-							    ; Yes, It is RIGHT button
-			btfss	    PORTD, 0		    
-			    goto restore_current_display
-			goto poll_specific_key_common		    
-		check_col1_pressed_def:
-		    bcf	LATB, 1
-		    
-		    movf    rdPressedCoordinate, 0
-		    incf    WREG
-		    
-		    dcfsnz  WREG		    ; Is it ROW0
-			bra col1_row0_pressed_def   
-		    dcfsnz  WREG		    ; Is it ROW1
-			bra col1_row1_pressed_def    
-		    dcfsnz  WREG		    ; Is it ROW2
-			bra col1_row2_pressed_def
-		    
-		    goto restore_current_display
-			
-
-		    col1_row0_pressed_def:
-			btfss	    PORTD, 3
-			    goto restore_current_display
-			goto poll_specific_key_common
-		    col1_row1_pressed_def:
-			btfss	    PORTD, 2
-			    goto restore_current_display
-			goto poll_specific_key_common
-		    col1_row2_pressed_def:
-			btfss	    PORTD, 1
-			    goto restore_current_display
-			goto poll_specific_key_common
-		    col1_row3_pressed_def:
-			; shouldn't be here
-			goto restore_current_display
-		check_col0_pressed_def:
-		    bcf	LATB, 0
-		    
-		    movf    rdPressedCoordinate, 0
-		    incf    WREG
-		    
-		    dcfsnz  WREG		    ; Is it ROW0
-			bra col0_row0_pressed_def   
-		    dcfsnz  WREG		    ; Is it ROW1
-			bra col0_row1_pressed_def
-		    dcfsnz  WREG		    ; Is it ROW2
-			bra col0_row2_pressed_def
-		    dcfsnz  WREG		    ; Is it ROW3
-			bra col0_row3_pressed_def
-			
-		    goto restore_current_display
-
-		    col0_row0_pressed_def:
-			; shouldn't be here
-			goto restore_current_display
-		    col0_row1_pressed_def:
-			btfss	    PORTD, 2
-			    goto restore_current_display
-			goto poll_specific_key_common
-		    col0_row2_pressed_def:
-			btfss	    PORTD, 1
-			    goto restore_current_display
-			goto poll_specific_key_common
-		    col0_row3_pressed_def:
-							    ; Yes, It is LEFT button
-			btfss	    PORTD, 0
-			    goto restore_current_display
-			goto poll_specific_key_common
-		poll_specific_key_common:    
-		    bcf	isAnyKeyPressed, 2	; Change state into
-		    bsf	isAnyKeyPressed, 3	; mightBeReleased	   
-
-		    bsf		attentionRequired, 2	; Timer is set for KEYPAD
-		    
-		    call set_timer1_debouncing
-
-		    goto restore_current_display
-	keypad_timer_in_writeState:
-	    call save_current_display
+	    btfsc   keypadState, 0
+		bra keypad_definetlyReleased
+	    btfsc   keypadState, 1
+		bra keypad_mightBePressed
+	    btfsc   keypadState, 2
+		bra keypad_definetlyPressed
+	    btfsc   keypadState, 3
+		bra keypad_mightBeReleased
 	    
-	    bcf	attentionRequired, 2	; Attention is given, clear flag	    
-
-	    btfsc   isAnyKeyPressed, 1	    ; Is in mightBePressed
-		bra keypad_mightBePressed	    ; Yes, 
-	    btfsc   isAnyKeyPressed, 3	    ; Is in mightBeReleased
-		bra keypad_mightBeReleased	    ; Yes,
-
-	    keypad_mightBePressed:
-		bsf	LATB, 0
-		bsf	LATB, 1
-		bsf	LATB, 2
-		
-		movf	rbPressedCoordinate, 0
-		incf	WREG
-		
-		dcfsnz	WREG	    ; is it COL0
-		    bra check_col0_pressed
-		dcfsnz	WREG	    ; is it COL1
-		    bra check_col1_pressed
-		dcfsnz	WREG	    ; is it COL2
-		    bra check_col2_pressed
-		
-		goto goBack_definetlyReleased_keypad
-		
-		check_col2_pressed:
-		    bcf	LATB, 2
-		    
-		    movf    rdPressedCoordinate, 0
-		    incf    WREG
-		    
-		    dcfsnz  WREG		    ; Is it ROW0
-			bra col2_row0_pressed	  
-		    dcfsnz  WREG		    ; Is it ROW1
-			bra col2_row1_pressed    
-		    dcfsnz  WREG		    ; Is it ROW2
-			bra col2_row2_pressed
-		    dcfsnz  WREG		    ; Is it ROW3
-			bra col2_row3_pressed
-		    
-		    goto    goBack_definetlyReleased_keypad
-		    col2_row0_pressed:
-			btfsc	    PORTD, 3
-			    goto    goBack_definetlyReleased_keypad
-			
-			bcf	isAnyKeyPressed, 1
-			bsf	isAnyKeyPressed, 2
-			goto restore_current_display
-		    col2_row1_pressed:
-			btfsc	    PORTD, 2
-			    goto    goBack_definetlyReleased_keypad
-			
-			bcf	isAnyKeyPressed, 1
-			bsf	isAnyKeyPressed, 2
-			goto restore_current_display
-		    col2_row2_pressed:
-			btfsc	    PORTD, 1
-			    goto    goBack_definetlyReleased_keypad
-			
-			bcf	isAnyKeyPressed, 1
-			bsf	isAnyKeyPressed, 2
-			goto restore_current_display
-		    col2_row3_pressed:
-			; shouldn't be here
-			goto goBack_definetlyReleased_keypad	    
-		check_col1_pressed:
-		    bcf	LATB, 1
-		    
-		    movf    rdPressedCoordinate, 0
-		    incf    WREG
-		    
-		    dcfsnz  WREG		    ; Is it ROW0
-			bra col1_row0_pressed	    
-		    dcfsnz  WREG		    ; Is it ROW1
-			bra col1_row1_pressed    
-		    dcfsnz  WREG		    ; Is it ROW2
-			bra col1_row2_pressed
-		    dcfsnz  WREG		    ; Is it ROW3
-			bra col1_row3_pressed
-		    
-		    goto    goBack_definetlyReleased_keypad		    
-		    
-		    col1_row0_pressed:
-			btfsc	    PORTD, 3
-			    goto    goBack_definetlyReleased_keypad
-			
-			bcf	isAnyKeyPressed, 1
-			bsf	isAnyKeyPressed, 2
-			goto restore_current_display
-		    col1_row1_pressed:
-			btfsc	    PORTD, 2
-			    goto    goBack_definetlyReleased_keypad
-			
-			bcf	isAnyKeyPressed, 1
-			bsf	isAnyKeyPressed, 2
-			goto restore_current_display
-		    col1_row2_pressed:
-			btfsc	    PORTD, 1
-			    goto    goBack_definetlyReleased_keypad
-			
-			bcf	isAnyKeyPressed, 1
-			bsf	isAnyKeyPressed, 2
-			goto restore_current_display
-		    col1_row3_pressed:
-			; shouldn't be here
-			goto goBack_definetlyReleased_keypad
-		check_col0_pressed:
-		    bcf	LATB, 0
-		    
-		    movf    rdPressedCoordinate, 0
-		    incf    WREG
-			
-		    dcfsnz  WREG		    ; Is it ROW0
-			bra col0_row0_pressed	
-		    dcfsnz  WREG		    ; Is it ROW1
-			bra col0_row1_pressed    
-		    dcfsnz  WREG		    ; Is it ROW2
-			bra col0_row2_pressed
-		    dcfsnz  WREG		    ; Is it ROW3
-			bra col0_row3_pressed
-		    
-		    goto    goBack_definetlyReleased_keypad
-		    col0_row0_pressed:
-			; shouldn't be here
-			goto goBack_definetlyReleased_keypad
-		    col0_row1_pressed:
-			btfsc	    PORTD, 2
-			    goto    goBack_definetlyReleased_keypad
-			
-			bcf	isAnyKeyPressed, 1
-			bsf	isAnyKeyPressed, 2
-			goto restore_current_display
-		    col0_row2_pressed:
-			btfsc	    PORTD, 1
-			    goto    goBack_definetlyReleased_keypad
-			
-			bcf	isAnyKeyPressed, 1
-			bsf	isAnyKeyPressed, 2
-			goto restore_current_display
-		    col0_row3_pressed:
-			; shouldn't be here
-			goto goBack_definetlyReleased_keypad
-		goBack_definetlyReleased_keypad:
-			bcf	isAnyKeyPressed, 1
-			bsf	isAnyKeyPressed, 0
-			goto restore_current_display		
+	    nop	; Shouldn't be here
+	    
 	    keypad_mightBeReleased:
-		bsf	LATB, 0
-		bsf	LATB, 1
-		bsf	LATB, 2
+		btfss	attentionRequired, 3	; Is time is up yet ?
+		    return			; No, 
+		btfss	isKeypadWaiting, 0		; Is this for keypad ?
+		    return			; No,
 		
-		movf	rbPressedCoordinate, 0
-		incf	WREG
+		clrf	isKeypadWaiting		; Clear related flags
+		clrf	attentionRequired
 		
-		dcfsnz	WREG		    ; Is it on COL0
-		    bra	check_col0_released   	    ; then, must be on COL0 
-		dcfsnz	WREG		    ; Is it on COL1
-		    bra check_col1_released
-		dcfsnz	WREG		    ; Is it on COL2
-		    bra check_col2_released
+		btfsc	outerState, 1
+		    bra keypad_mightBeReleased_writeState
+		btfsc	outerState, 2
+		    bra keypad_mightBeReleased_reviewState
 		    
-		goto    goBack_definetlyPressed_keypad	
+		keypad_mightBeReleased_reviewState:
+		    movff   colCoordinate, col_arg
+		    movff   rowCoordinate, row_arg
+		    clrf    press_arg		    ; Looking for release event
+		    call    poll_given_key	    
+		    
+		    btfsc   ret, 0					; Is it still released
+			bra keypad_mightBeReleased_rev_found	; Yes, 
+		    
+									; No,
+		    clrf    keypadState
+		    bsf	    keypadState, 2	    ; Change the state back into definetlyPressed
+		    return		
+			
+		    keypad_mightBeReleased_rev_found:
+			clrf    keypadState		    ; Change the state into definetlyReleased
+			
+			test_left:
+			    movlw   0x0
+			    cpfseq  col_arg
+				bra test_right
+			    movlw	0x1
+			    cpfseq	reviewStateLeftMostLetter
+				decf    reviewStateLeftMostLetter
+			    return			    
+			test_right:
+			    movlw   0x2
+			    cpfseq  col_arg
+				bra test_nothing
+			    movlw	0x3
+			    cpfseq	reviewStateLeftMostLetter
+				incf    reviewStateLeftMostLetter
+			    return
+			test_nothing: ; Shouldn't come here, NEVER !!!!!
+			    return
+		keypad_mightBeReleased_writeState:
+		    clrf	press_arg
+		    movff	colCoordinate, col_arg
+		    movff	rowCoordinate, row_arg
+		    call	poll_given_key
+		    btfsc	ret, 0					; Is it still released
+			bra keypad_mightBeReleased_wri_found	; Yes, 
+
+									; No,
+		    clrf	keypadState
+		    bsf		keypadState, 2				; Then change the state back into definetlyPressed
+		    return
+		    keypad_mightBeReleased_wri_found:			
+			call perform_required_action
+			
+			;****** TIMER3 SETUP for letter commit time (1s) **********
+			bsf	T3CON, 4	; 1:2 Prescale is set
+
+			movlw	0x4D
+			movwf	commitCounter
+
+			movlw	0x3C
+			movwf	TMR3H
+			movlw	0xB0
+			movwf	TMR3L		; Initial value for 10ms
+
+
+			movf	PIR2		; Must have last-read value
+			bcf	PIR2, 1		; so that TMR3IF can be cleared
+
+			bsf	PIE2, 1		; TMR3 interrupt enabled
+			bsf	T3CON, 0	; TMR3 is started
+			;*****************************
+			
+			clrf	keypadState	    ; Change the state into definetlyReleased				
+			return
+		perform_required_action:
+		    movf	row_arg, 0
+		    mullw	0x3
+		    movf	PRODL, 0
+		    addwf	col_arg, 0
+		    addlw	0x1		; Released button place is calculated (1, 2, ..., 9, 10(LEFT), 11, 12(RIGHT)
+
+		    cpfseq	currentPushedButton
+			bra released_different_button
+		    bra released_the_same_button
+
+		    released_the_same_button:
+			incf    currentModulo
+			movlw   0x03
+			cpfslt  currentModulo
+			    clrf	currentModulo
+			return
+		    released_different_button:
+			movlw   0x0
+			cpfseq  currentPushedButton		; Is this a new button (no waiting commit) ?
+			    call commit_current_letter	; No, commit current letter
+
+			movf	row_arg, 0
+			mullw	0x3
+			movf	PRODL, 0
+			addwf	col_arg, 0
+			addlw	0x1		; Released button place is calculated (1, 2, ..., 9, 10(LEFT), 11, 12(RIGHT))
+
+			movwf	currentPushedButton ; Update current pushed button
+			clrf	currentModulo	    ; Start module from 0
+			return	    
+	    keypad_definetlyPressed:
+		clrf	press_arg	; Poll for release event
+		movff	colCoordinate, col_arg
+		movff	rowCoordinate, row_arg
+		call	poll_given_key
 		
+		btfsc	ret, 0
+		    bra keypad_definetlyPressed_found
+		return
 		
-		check_col2_released:
-		    bcf	LATB, 2
-		    
-		    
-		    movf    rdPressedCoordinate, 0
-		    incf    WREG
-		    
-		    dcfsnz  WREG		    ; Is it ROW0
-			bra col2_row0_released
-		    dcfsnz  WREG		    ; Is it ROW1
-			bra col2_row1_released
-		    dcfsnz  WREG		    ; Is it ROW2
-			bra col2_row2_released
-		    dcfsnz  WREG		    ; Is it ROW3
-			bra col2_row3_released
-		    
-		    goto    goBack_definetlyPressed_keypad
-		    
-		    col2_row0_released:
-			btfss	    PORTD, 3
-			    goto    goBack_definetlyPressed_keypad	
-			    
-			    
-			movlw	0x03
-			cpfseq	currentPushedButton	; Is it the same button
-			    bra	col2_row0_released_diff	; No, it is not
-			bra col2_row0_released_same	; Yes, it is
-			
-			col2_row0_released_same:
-			    incf    currentModulo	; Same button then increment
-			    
-			    movlw   0x03
-			    cpfslt  currentModulo	; Is it 3
-				clrf	currentModulo	; Yes, then cycle back to 0
-			    goto keypad_mightBeReleased_common
-			    
-			col2_row0_released_diff:
-			    movlw   0x00
-			    cpfsgt  currentPushedButton		; Is another button was pushed ?
-				bra col2_row0_released_diff_new	; No, then current place
-			    bra	col2_row0_released_diff_another	; Yes, then first commit
-			    
-			    col2_row0_released_diff_new:
-				movlw	0x03
-				movwf	currentPushedButton	; Change pushed button as this button
-				clrf	currentModulo		; First press, modulo is 0
-				
-				goto keypad_mightBeReleased_common		
-				
-			    col2_row0_released_diff_another:
-				call commit_current_letter
-				
-				movlw	0x03
-				movwf	currentPushedButton	; Change pushed button as this button
-				clrf	currentModulo		; First press, modulo is 0
-				
-				goto keypad_mightBeReleased_common
-		    col2_row1_released:
-			btfss	    PORTD, 0
-			    goto    goBack_definetlyPressed_keypad
-			    
-			movlw	0x06
-			cpfseq	currentPushedButton	; Is it the same button
-			    bra	col2_row1_released_diff	; No, it is not
-			bra col2_row1_released_same	; Yes, it is
-			
-			col2_row1_released_same:
-			    incf    currentModulo	; Same button then increment
-			    
-			    movlw   0x03
-			    cpfslt  currentModulo	; Is it 3
-				clrf	currentModulo	; Yes, then cycle back to 0
-			    goto keypad_mightBeReleased_common
-			    
-			col2_row1_released_diff:
-			    movlw   0x00
-			    cpfsgt  currentPushedButton		; Is another button was pushed ?
-				bra col2_row1_released_diff_new	; No, then current place
-			    bra	col2_row1_released_diff_another	; Yes, then first commit
-			    
-			    col2_row1_released_diff_new:
-				movlw	0x06
-				movwf	currentPushedButton	; Change pushed button as this button
-				clrf	currentModulo		; First press, modulo is 0
-				
-				goto keypad_mightBeReleased_common		
-				
-			    col2_row1_released_diff_another:
-				call commit_current_letter
-				
-				movlw	0x06
-				movwf	currentPushedButton	; Change pushed button as this button
-				clrf	currentModulo		; First press, modulo is 0
-				
-				goto keypad_mightBeReleased_common
-		    col2_row2_released:
-			btfss	    PORTD, 1
-			    goto    goBack_definetlyPressed_keypad
-			
-			movlw	0x09
-			cpfseq	currentPushedButton	; Is it the same button
-			    bra	col2_row2_released_diff	; No, it is not
-			bra col2_row2_released_same	; Yes, it is
-			
-			col2_row2_released_same:
-			    incf    currentModulo	; Same button then increment
-			    
-			    movlw   0x03
-			    cpfslt  currentModulo	; Is it 3
-				clrf	currentModulo	; Yes, then cycle back to 0
-			    goto keypad_mightBeReleased_common
-			    
-			col2_row2_released_diff:
-			    movlw   0x00
-			    cpfsgt  currentPushedButton		; Is another button was pushed ?
-				bra col2_row2_released_diff_new	; No, then current place
-			    bra	col2_row2_released_diff_another	; Yes, then first commit
-			    
-			    col2_row2_released_diff_new:
-				movlw	0x09
-				movwf	currentPushedButton	; Change pushed button as this button
-				clrf	currentModulo		; First press, modulo is 0
-				
-				goto keypad_mightBeReleased_common		
-				
-			    col2_row2_released_diff_another:
-				call commit_current_letter
-				
-				movlw	0x09
-				movwf	currentPushedButton	; Change pushed button as this button
-				clrf	currentModulo		; First press, modulo is 0
-				
-				goto keypad_mightBeReleased_common
-		    col2_row3_released:
-			; shouldn't be here	
-		check_col1_released:
-		    bcf	LATB, 1
-		    
-		    movf    rdPressedCoordinate, 0
-		    incf    WREG
-		    
-		    dcfsnz  WREG		    ; Is it ROW0
-			bra col1_row0_released	    
-		    dcfsnz  WREG		    ; Is it ROW1
-			bra col1_row1_released  
-		    dcfsnz  WREG		    ; Is it ROW2
-			bra col1_row2_released
-		    dcfsnz  WREG		    ; Is it ROW3
-			bra col1_row3_released
-			
-		    goto    goBack_definetlyPressed_keypad
+		keypad_definetlyPressed_found:
+		    clrf    keypadState
+		    bsf	keypadState, 3		; Change the state into mightBeReleased
 
-			
-		    col1_row0_released:
-			movf	PORTD, 0
-			btfss	    PORTD, 3
-			    goto    goBack_definetlyPressed_keypad
-			    
-			movlw	0x02
-			cpfseq	currentPushedButton	; Is it the same button
-			    bra	col1_row0_released_diff	; No, it is not
-			bra col1_row0_released_same	; Yes, it is
-			
-			col1_row0_released_same:
-			    incf    currentModulo	; Same button then increment
-			    
-			    movlw   0x03
-			    cpfslt  currentModulo	; Is it 3
-				clrf	currentModulo	; Yes, then cycle back to 0
-			    goto keypad_mightBeReleased_common
-			    
-			col1_row0_released_diff:
-			    movlw   0x00
-			    cpfsgt  currentPushedButton		; Is another button was pushed ?
-				bra col1_row0_released_diff_new	; No, then current place
-			    bra	col1_row0_released_diff_another	; Yes, then first commit
-			    
-			    col1_row0_released_diff_new:
-				movlw	0x02
-				movwf	currentPushedButton	; Change pushed button as this button
-				clrf	currentModulo		; First press, modulo is 0
-				
-				goto keypad_mightBeReleased_common		
-				
-			    col1_row0_released_diff_another:
-				call commit_current_letter
-				
-				movlw	0x02
-				movwf	currentPushedButton	; Change pushed button as this button
-				clrf	currentModulo		; First press, modulo is 0
-				
-				goto keypad_mightBeReleased_common
-		    col1_row1_released:
-			btfss	    PORTD, 2
-			    goto    goBack_definetlyPressed_keypad
-			
-			movlw	0x05
-			cpfseq	currentPushedButton	; Is it the same button
-			    bra	col1_row1_released_diff	; No, it is not
-			bra col1_row1_released_same	; Yes, it is
-			
-			col1_row1_released_same:
-			    incf    currentModulo	; Same button then increment
-			    
-			    movlw   0x03
-			    cpfslt  currentModulo	; Is it 3
-				clrf	currentModulo	; Yes, then cycle back to 0
-			    goto keypad_mightBeReleased_common
-			    
-			col1_row1_released_diff:
-			    movlw   0x00
-			    cpfsgt  currentPushedButton		; Is another button was pushed ?
-				bra col1_row1_released_diff_new	; No, then current place
-			    bra	col1_row1_released_diff_another	; Yes, then first commit
-			    
-			    col1_row1_released_diff_new:
-				movlw	0x05
-				movwf	currentPushedButton	; Change pushed button as this button
-				clrf	currentModulo		; First press, modulo is 0
-				
-				goto keypad_mightBeReleased_common		
-				
-			    col1_row1_released_diff_another:
-				call commit_current_letter
-				
-				movlw	0x05
-				movwf	currentPushedButton	; Change pushed button as this button
-				clrf	currentModulo		; First press, modulo is 0
-				
-				goto keypad_mightBeReleased_common
-		    col1_row2_released:
-			btfss	    PORTD, 1
-			    goto    goBack_definetlyPressed_keypad
-			
-			movlw	0x08
-			cpfseq	currentPushedButton	; Is it the same button
-			    bra	col1_row2_released_diff	; No, it is not
-			bra col1_row2_released_same	; Yes, it is
-			
-			col1_row2_released_same:
-			    incf    currentModulo	; Same button then increment
-			    
-			    movlw   0x03
-			    cpfslt  currentModulo	; Is it 3
-				clrf	currentModulo	; Yes, then cycle back to 0
-			    goto keypad_mightBeReleased_common
-			    
-			col1_row2_released_diff:
-			    movlw   0x00
-			    cpfsgt  currentPushedButton		; Is another button was pushed ?
-				bra col1_row2_released_diff_new	; No, then current place
-			    bra	col1_row2_released_diff_another	; Yes, then first commit
-			    
-			    col1_row2_released_diff_new:
-				movlw	0x08
-				movwf	currentPushedButton	; Change pushed button as this button
-				clrf	currentModulo		; First press, modulo is 0
-				
-				goto keypad_mightBeReleased_common		
-				
-			    col1_row2_released_diff_another:
-				call commit_current_letter
-				
-				movlw	0x08
-				movwf	currentPushedButton	; Change pushed button as this button
-				clrf	currentModulo		; First press, modulo is 0
-				
-				goto keypad_mightBeReleased_common
-		    col1_row3_released:
-			; shouldn't be here
-		check_col0_released:
-		    bcf	LATB, 0
+		    call    set_timer1_debouncing	; Debouncing TIMER1 is set
+		    setf    isKeypadWaiting		; For keypad
+		    return
+	    
+	    keypad_mightBePressed:
+		btfss	attentionRequired, 3	; Is time is up yet ?
+		    return			; No, 
+		btfss	isKeypadWaiting, 0		; Is this for keypad ?
+		    return			; No,
+		
+		clrf	isKeypadWaiting		; Clear related flags
+		clrf	attentionRequired
 		    
-		    movf    rdPressedCoordinate, 0
-		    incf    WREG
-		    
-		    dcfsnz  WREG		    ; Is it ROW0
-			bra col0_row0_released
-		    dcfsnz  WREG		    ; Is it ROW1
-			bra col0_row1_released    
-		    dcfsnz  WREG		    ; Is it ROW2
-			bra col0_row2_released
-		    dcfsnz  WREG		    ; Is it ROW3
-			bra col0_row3_released
-		    
-		    goto    goBack_definetlyPressed_keypad
-		    
-		    col0_row0_released:
-			; shouldn't be here
-			goto    goBack_definetlyPressed_keypad
-		    col0_row1_released:
-			btfss	    PORTD, 2
-			    goto    goBack_definetlyPressed_keypad
-			    
-			movlw	0x04
-			cpfseq	currentPushedButton	; Is it the same button
-			    bra	col0_row1_released_diff	; No, it is not
-			bra col0_row1_released_same	; Yes, it is
-			
-			col0_row1_released_same:
-			    incf    currentModulo	; Same button then increment
-			    
-			    movlw   0x03
-			    cpfslt  currentModulo	; Is it 3
-				clrf	currentModulo	; Yes, then cycle back to 0
-			    goto keypad_mightBeReleased_common
-			    
-			col0_row1_released_diff:
-			    movlw   0x00
-			    cpfsgt  currentPushedButton		; Is another button was pushed ?
-				bra col0_row1_released_diff_new	; No, then current place
-			    bra	col0_row1_released_diff_another	; Yes, then first commit
-			    
-			    col0_row1_released_diff_new:
-				movlw	0x04
-				movwf	currentPushedButton	; Change pushed button as this button
-				clrf	currentModulo		; First press, modulo is 0
-				
-				goto keypad_mightBeReleased_common		
-				
-			    col0_row1_released_diff_another:
-				call commit_current_letter
-				
-				movlw	0x04
-				movwf	currentPushedButton	; Change pushed button as this button
-				clrf	currentModulo		; First press, modulo is 0
-				
-				goto keypad_mightBeReleased_common
-		    col0_row2_released:
-			btfss	    PORTD, 1
-			    goto    goBack_definetlyPressed_keypad
-			
-			movlw	0x07
-			cpfseq	currentPushedButton	; Is it the same button
-			    bra	col0_row2_released_diff	; No, it is not
-			bra col0_row2_released_same	; Yes, it is
-			
-			col0_row2_released_same:
-			    incf    currentModulo	; Same button then increment
-			    
-			    movlw   0x03
-			    cpfslt  currentModulo	; Is it 3
-				clrf	currentModulo	; Yes, then cycle back to 0
-			    goto keypad_mightBeReleased_common
-			    
-			col0_row2_released_diff:
-			    movlw   0x00
-			    cpfsgt  currentPushedButton		; Is another button was pushed ?
-				bra col0_row2_released_diff_new	; No, then current place
-			    bra	col0_row2_released_diff_another	; Yes, then first commit
-			    
-			    col0_row2_released_diff_new:
-				movlw	0x07
-				movwf	currentPushedButton	; Change pushed button as this button
-				clrf	currentModulo		; First press, modulo is 0
-				
-				goto keypad_mightBeReleased_common		
-				
-			    col0_row2_released_diff_another:
-				call commit_current_letter
-				
-				movlw	0x07
-				movwf	currentPushedButton	; Change pushed button as this button
-				clrf	currentModulo		; First press, modulo is 0
-				
-				goto keypad_mightBeReleased_common
-		    col0_row3_released:
-			; shouldn't be here
-			goto    goBack_definetlyPressed_keypad
-		goBack_definetlyPressed_keypad:
-		    bcf	isAnyKeyPressed, 3
-		    bsf	isAnyKeyPressed, 2
-		    goto restore_current_display
-		keypad_mightBeReleased_common:
-		    bcf	isAnyKeyPressed, 3
-		    bsf	isAnyKeyPressed, 0    
-		    
-		    ;****** TIMER3 SETUP for letter commit time (1s) **********
-		    bsf	T3CON, 4	; 1:2 Prescale is set
-		    
-		    movlw	0x4D
-		    movwf	commitCounter
+						; Yes, 
+		setf	press_arg
+		movff	colCoordinate, col_arg
+		movff	rowCoordinate, row_arg
+		call	poll_given_key		; Poll for specific button if it is still pressed
+		
+		btfsc	ret, 0				; Is it still pressed ?
+		    bra	keypad_mightBePressed_found	; Yes, then change the state into definetlyPressed
+	    
+		clrf	keypadState
+		bsf	keypadState, 1	    ; No, then change the state back into definetlyReleased
+		return
+		
+		keypad_mightBePressed_found:
+		    clrf	keypadState
+		    bsf	keypadState, 2	    ; Change into definetlyPressed
+		    return
 
-		    movlw	0x3C
-		    movwf	TMR3H
-		    movlw	0xB0
-		    movwf	TMR3L		; Initial value for 10ms
+	    keypad_definetlyReleased:	
+		btfsc	outerState, 1			
+		    bra keypad_definetlyReleased_writeState	; If in writeState, poll 2-9
+		btfsc	outerState, 2			
+		    bra	keypad_definetlyReleased_reviewState	; If in reviewState, poll only RIGHT / LEFT
+		keypad_definetlyReleased_writeState:	
+		    btfsc   keypadState, 0	    ; No button is pressed, poll for pressed
+			setf	press_arg	    ; Means looking for press event
+		    btfsc   keypadState, 2	    ; A button is pressed, poll that button for released
+			clrf	press_arg	    ; Means looking for release event	
+		    movlw   0x2
+		    movwf   col_arg	; Start from COL2
+		    loop_col:
+			movlw   0x3
+			movwf   row_arg	; Start from ROW3			
+			loop_row:    
+			    call    poll_given_key
+			    btfsc   ret, 0			; Is return value true ?
+				bra keypad_definetlyReleased_found		; Yes,
+			loop_row_end:			; No,
+			    decf	row_arg
+			    movlw   0xFF		; For comparing less than 0
+			    cpfseq  row_arg			
+				bra loop_row		; As long as row_arg is greater than or equal to 0, continue loop_row	
+		    loop_col_end:
+			decf    col_arg
+			cpfseq  col_arg
+			    bra loop_col			; As long as col_arg is greater than or equal to 0, continune loop_row
+		    return			; No key activity is found			    
+		keypad_definetlyReleased_reviewState:
+		    movlw	0x3
+		    movwf	row_arg		; We will poll only ROW3 (since RIGHT and LEFT is on ROW3)
 
+		    movlw	0x0
+		    movwf	col_arg		; Poll for LEFT
+		    call	poll_given_key
+		    btfsc	ret, 0
+			bra keypad_definetlyReleased_found
 
-		    movf	PIR2		; Must have last-read value
-		    bcf	PIR2, 1		; so that TMR3IF can be cleared
+		    movlw	0x2
+		    movwf	col_arg		; Poll for RIGHT
+		    call	poll_given_key
+		    btfsc	ret, 0
+			bra keypad_definetlyReleased_found
 
-		    bsf	PIE2, 1		; TMR3 interrupt enabled
-		    bsf	T3CON, 0	; TMR3 is started
-		    ;*****************************
-		    
-		    goto restore_current_display
-			
-	rb4_timer_detected:
-	    bcf	attentionRequired, 1	; Attention is given, clear flag
+		    return			; No key activity is found
+
+		keypad_definetlyReleased_found:			; A key activity is found
+		    movff   col_arg, colCoordinate	; save column
+		    movff   row_arg, rowCoordinate	; save row
+
+		    clrf    keypadState
+		    bsf	    keypadState, 1		; Move into mightBePressed state
+
+		    call    set_timer1_debouncing	; Debouncing TIMER1 is set
+		    setf    isKeypadWaiting		; For keypad
+		    return
+;***********************************************
+	
+	
+	rb4_timer_detected:	    
+	    bcf	    attentionRequired, 1	; Attention is given, clear flag
+	    
+	    btfss   attentionRequired, 3	; RB4 debouncing timer is up
+		return
+		
+	    bcf	    attentionRequired, 3	; Timer flag cleared
 
 	    btfsc   rb4ButtonState, 1	    ; Is in mightBePressed
 		bra rb4_mightBePressed	    ; Yes, 
@@ -1670,7 +1056,7 @@ writeState:
 		    return
     
     update_screen_in_writeState:
-	bcf shouldUpdateScreen, 0
+	;bcf shouldUpdateScreen, 0
 	btfsc   whichScreen, 0  ; Is it Screen1 which must be drawn
 	    bra draw_screen_1   ; Yes, then draw Screen1
 	btfsc   whichScreen, 1  ; Is it Screen2 which must be drawn
@@ -1754,12 +1140,12 @@ writeState:
 
 	    return
 reviewState:
-    btfsc   shouldUpdateScreen, 0	    ; Is 5ms up ?
+    ;btfsc   shouldUpdateScreen, 0	    ; Is 5ms up ?
 	call update_screen_in_reviewState	    ; Yes, then draw next 7-seg    
     goto main
     
     update_screen_in_reviewState:
-	bcf shouldUpdateScreen, 0
+	;bcf shouldUpdateScreen, 0
 	btfsc   whichScreen, 0  ; Is it Screen1 which must be drawn
 	    bra draw_screen_1_in_reviewState   ; Yes, then draw Screen1
 	btfsc   whichScreen, 1  ; Is it Screen2 which must be drawn
