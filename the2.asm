@@ -354,7 +354,7 @@ initialState:
     ;************************   
     
     ;***** Start Main Loop ******
-    bra from_initial_to_write;main
+    ;bra from_initial_to_write;main
     ;************************
     rb3_Released:
 	btfsc	PORTB, 3	    ; Is Pressed ? (LOW ?)
@@ -511,7 +511,7 @@ initialState:
 	bsf	    INTCON, 7	    ; Enable GIE
 	;************************	
 	
-	call set_letters
+	;call set_letters
 	bra	main	
 	
         
